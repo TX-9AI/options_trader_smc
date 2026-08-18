@@ -1,5 +1,36 @@
 """
 tests/backtest_harness.py — offline multi-day backtest over spliced 1-minute tape.
+v1.3 — 2026-08-18 — `--engine smc`: DRIVE THE SMC CORE, AND MEASURE THE GATE.
+        Extended rather than forked, deliberately — a second harness means two
+        things that disagree about what a bar is. Everything SMCEngine.update()
+        needs was already computed per bar (price, the 1m slice, s5, the REAL
+        StructureAnalyzer `st`, the REAL LiquidityMapper `lq`, `vs`, a mocked
+        clock), so the core slots in exactly where clf.classify() lands and
+        overrides primary_regime/conviction — the same boundary main.py
+        overrides. Four things this adds beyond the label swap:
+        (1) THE REVOCATION GATE IS NOW MEASURED. The census calls strategies
+            directly and never touches attempt_new_entry, where the gate
+            lives — so without this the replay would show label changes and
+            silently miss the entire withdrawal mechanism, which IS the thing
+            under test. Every census setup now also records
+            entry_permitted(direction): permitted / REVOKED.
+        (2) CADENCE IS FORCED TO 1 UNDER smc, and refused rather than
+            silently degraded. Break detection is edge-triggered against the
+            engine's own swing memory; a skipped bar drops a crossing with no
+            error and the anticipation logic quietly gets worse.
+        (3) --symbol-glob splices the per-date OHLC dirs itself. A shell-side
+            `cat` repeats headers into the middle of the tape.
+        (4) --vix-const N substitutes a flat VIX when no VIX tape is at hand,
+            PRINTED as an assumption. VIX feeds the macro gates and the
+            premium model here; it does not decide permission.
+        ⚠️ TIMESTAMP ASSERTION. data/candle_logger writes ET ISO timestamps
+        WITH an offset, so prep()'s tz_localize is correctly skipped and the
+        index is aware-ET. That is checked now instead of assumed: if a
+        session's first bar is not 09:30 ET the run STOPS. A four-hour shift
+        would put the ORB window in pre-market and produce a confident wrong
+        answer rather than an error.
+        ⚠️ STILL OCCURRENCE, NOT P&L — the chain is a modelled BS synth with
+        no fill model. Nothing here is a return.
 v1.2 — 2026-07-31 — `--all` and `--json PATH`. The fired listing was capped at
         `fired[:8]`, which is fine for reading one symbol and fatal for pooling:
         per-trade R BY REGIME across 29 symbols was impossible, and the first 8
@@ -85,17 +116,67 @@ _CLOCK = {"t": None}
 OE.now_et = lambda: _CLOCK["t"]
 OE.is_past_entry_cutoff = lambda: (_CLOCK["t"].hour, _CLOCK["t"].minute) >= (11, 0)
 
+# v1.3 — SMC run state. Module-level so the timeline loop stays hot and the
+# report can read them without threading a return value through v1.0's shape.
+_SMC_ERRORS = []
+_SMC_TRANSITIONS = []
+_SMC_LAST = {"phase": None}
+
 RTH_OPEN, RTH_CLOSE, HARD_CLOSE = dtime(9, 30), dtime(16, 0), dtime(15, 45)
 RANGE_END, ORB_CUTOFF = dtime(9, 35), dtime(11, 0)
 
 
 # ───────────────────────── data prep ─────────────────────────
-def prep(path):
+def prep(path, assert_et=False):
     df = load_ohlc(path)
     if df.index.tz is None:
         df.index = df.index.tz_localize(ET)
+    else:
+        df.index = df.index.tz_convert(ET)
     df = df[(df.index.time >= RTH_OPEN) & (df.index.time <= RTH_CLOSE)]
+    if assert_et and len(df):
+        # v1.3 — the tape must be Eastern. candle_logger writes ET ISO with an
+        # offset, so this should always hold; it is asserted because the
+        # failure mode is silent. A UTC tape would put 09:30 ET at 13:30 and
+        # every ORB in this run would be built from pre-market bars.
+        firsts = {d: df[df.index.date == d].index[0].time()
+                  for d in sorted(set(df.index.date))}
+        bad = {d: t for d, t in firsts.items() if t != RTH_OPEN}
+        if len(bad) > len(firsts) // 2:
+            raise SystemExit(
+                f"REFUSING TO RUN: {len(bad)}/{len(firsts)} sessions in "
+                f"{os.path.basename(path)} do not start at 09:30 ET "
+                f"(e.g. {sorted(bad.items())[:3]}). The tape is not Eastern, "
+                f"or it is not RTH — every ORB and killzone in this run would "
+                f"be wrong. Fix the tape, do not adjust the harness.")
     return df
+
+
+def load_glob(pattern):
+    """v1.3 — splice per-date OHLC files into one tape, in date order.
+
+    The control box keeps one directory per session, so the multi-day tape the
+    engines need is assembled here rather than by a shell `cat`, which would
+    repeat the header row into the middle of the data.
+    """
+    import glob as _glob
+    paths = sorted(_glob.glob(os.path.expanduser(pattern)))
+    if not paths:
+        raise SystemExit(f"no files matched {pattern}")
+    frames = []
+    for pth in paths:
+        d = load_ohlc(pth)
+        if d is None or not len(d):
+            continue
+        frames.append(d)
+    if not frames:
+        raise SystemExit(f"{len(paths)} file(s) matched {pattern} but none "
+                         f"parsed as OHLC")
+    out = pd.concat(frames).sort_index()
+    out = out[~out.index.duplicated(keep="last")]
+    print(f"  spliced {len(frames)} file(s) → {len(out)} bars "
+          f"({out.index[0]} → {out.index[-1]})")
+    return out
 
 
 def vix_asof(vix_df, ts):
@@ -217,8 +298,16 @@ def _synth_chain(bs, spot, vix, now_ts):
                         iv_rank=50.0, calls=calls, puts=puts)
 
 
-def build_regime_timeline(df, vix_df, fed_days, cadence_min, _census=None):
-    """Returns {timestamp -> (regime_label, RegimeState, confluence_dict)} at cadence."""
+def build_regime_timeline(df, vix_df, fed_days, cadence_min, _census=None,
+                          smc=None):
+    """Returns {timestamp -> (regime_label, RegimeState, confluence_dict)} at cadence.
+
+    v1.3 — when `smc` is an SMCEngine, it is driven from the SAME per-bar
+    inputs the v1.3 classifier just used and overrides primary_regime and
+    conviction. That is the identical boundary main.py's smc branch overrides,
+    which is what makes this replay about the ENGINE rather than about a
+    parallel reimplementation of it.
+    """
     d5c, d15c, d1hc = resample(df, "5min"), resample(df, "15min"), resample(df, "1h")
     d4hc, d1dc = resample(df, "4h"), resample(df, "1D")
     volE, trE, stE, lqE = (get_volatility_engine(), get_trend_engine(),
@@ -256,6 +345,21 @@ def build_regime_timeline(df, vix_df, fed_days, cadence_min, _census=None):
                 rc = clf.classify(vs, tr, st, lq, macro=macro, trigger="backtest")
             except Exception:
                 continue
+            # ── v1.3 — SMC OVERRIDE ────────────────────────────────────────
+            smc_st = None
+            if smc is not None:
+                try:
+                    smc_st = smc.update(
+                        price=price,
+                        df_1m=df[(df.index >= sess_start) & (df.index <= t)],
+                        df_5m=s5, structure=st, liq_map=lq, vol_state=vs,
+                        now_et=t.to_pydatetime())
+                    rc.primary_regime = smc_st.label
+                    rc.conviction = smc_st.confidence
+                except Exception as _se:                        # noqa: BLE001
+                    # LOUD. A silently-skipped tick would leave the v1.3 label
+                    # in place and the run would look like an SMC run.
+                    _SMC_ERRORS.append(f"{t}: {type(_se).__name__}: {_se}")
             # ── v1.1: STRATEGY ATTEMPT CENSUS ───────────────────────────
             # v1.0 drove ORB only, so "how often does each strategy actually
             # get a setup" was unanswerable offline — which is exactly how
@@ -291,6 +395,23 @@ def build_regime_timeline(df, vix_df, fed_days, cadence_min, _census=None):
                     _c["setups"] += 1
                     _c["by_regime"][str(rc.primary_regime)] = \
                         _c["by_regime"].get(str(rc.primary_regime), 0) + 1
+                    # ── v1.3 — WOULD THE REVOCATION GATE HAVE LET IT THROUGH?
+                    # The census never reaches attempt_new_entry, where the
+                    # gate lives, so the question is asked here directly. A
+                    # direction-neutral signal (condor legs) is never gated —
+                    # by construction, exactly as on the box.
+                    if smc is not None:
+                        _side = getattr(_sig, "option_side", "") or ""
+                        _dir = ("bullish" if _side == "call"
+                                else "bearish" if _side == "put" else "")
+                        if _dir and not smc.entry_permitted(_dir):
+                            _c["revoked"] += 1
+                            _c["revoked_at"].append(
+                                (str(t), _dir, str(rc.primary_regime),
+                                 smc_st.setup.phase if smc_st else "?",
+                                 smc_st.setup.thesis if smc_st else "?"))
+                        else:
+                            _c["permitted"] += 1
                     _iv = getattr(_sig, "is_valid", None)
                     _ok = bool(_iv() if callable(_iv) else _iv) \
                         if _iv is not None else True
@@ -305,6 +426,15 @@ def build_regime_timeline(df, vix_df, fed_days, cadence_min, _census=None):
                     cdict = conf.score(vs, tr, st, lq)
                 except Exception:
                     cdict = None
+            if smc_st is not None:
+                _ph = (smc_st.setup.phase, smc_st.setup.thesis,
+                       smc_st.setup.basis)
+                if _ph != _SMC_LAST["phase"]:
+                    _SMC_TRANSITIONS.append((str(t), _ph[0], _ph[1], _ph[2],
+                                             str(rc.primary_regime),
+                                             round(float(smc_st.position_pct), 3),
+                                             str(smc_st.zone)))
+                    _SMC_LAST["phase"] = _ph
             timeline[t] = (rc.primary_regime, rc, vs, st, lq, macro, cdict)
     return timeline
 
@@ -415,8 +545,18 @@ def simulate_trade(df, vix_df, setup, pm=None):
 # ───────────────────────── main ─────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--symbol", required=True, help="per-symbol 1m OHLC CSV")
-    ap.add_argument("--vix", required=True, help="1m VIX CSV, same window")
+    ap.add_argument("--symbol", default="", help="per-symbol 1m OHLC CSV")
+    ap.add_argument("--symbol-glob", default="",
+                    help="v1.3 — splice every match into one tape, e.g. "
+                         "'~/day_trader_pro/ohlc/*/QQQ_ohlc_*.csv'")
+    ap.add_argument("--vix", default="", help="1m VIX CSV, same window")
+    ap.add_argument("--vix-const", type=float, default=None,
+                    help="v1.3 — flat VIX when no tape is available. Printed "
+                         "as an assumption; feeds macro gates + the premium "
+                         "model, never permission")
+    ap.add_argument("--engine", choices=("v13", "smc"), default="v13",
+                    help="v1.3 — 'smc' drives smc/smc_engine.SMCEngine and "
+                         "overrides the committed label + conviction")
     ap.add_argument("--model-premium", action="store_true", help="add modeled BS premium P&L")
     ap.add_argument("--dte", type=int, default=0, help="days to expiry for the premium model (0=0DTE)")
     ap.add_argument("--fed-days", default="", help="comma YYYY-MM-DD FOMC dates")
@@ -429,9 +569,44 @@ def main():
                     help="skip the non-ORB strategy attempt census (v1.0 behaviour)")
     args = ap.parse_args()
 
-    sym = os.path.splitext(os.path.basename(args.symbol))[0].split("_")[0]
-    df = prep(args.symbol)
-    vix_df = prep(args.vix)
+    if not args.symbol and not args.symbol_glob:
+        raise SystemExit("need --symbol or --symbol-glob")
+    if args.symbol_glob:
+        import re as _re
+        _m = _re.search(r"([A-Z]{1,6})", os.path.basename(args.symbol_glob))
+        sym = _m.group(1) if _m else "SYM"
+        df = load_glob(args.symbol_glob)
+        df = df[(df.index.time >= RTH_OPEN) & (df.index.time <= RTH_CLOSE)]
+        if df.index.tz is None:
+            df.index = df.index.tz_localize(ET)
+        else:
+            df.index = df.index.tz_convert(ET)
+        _firsts = {d: df[df.index.date == d].index[0].time()
+                   for d in sorted(set(df.index.date))}
+        _bad = {d: t for d, t in _firsts.items() if t != RTH_OPEN}
+        if len(_bad) > len(_firsts) // 2:
+            raise SystemExit(
+                f"REFUSING TO RUN: {len(_bad)}/{len(_firsts)} sessions do not "
+                f"start at 09:30 ET (e.g. {sorted(_bad.items())[:3]}). The "
+                f"tape is not Eastern. Fix the tape, not the harness.")
+    else:
+        sym = os.path.splitext(os.path.basename(args.symbol))[0].split("_")[0]
+        df = prep(args.symbol, assert_et=True)
+
+    if args.vix:
+        vix_df = prep(args.vix)
+    elif args.vix_const is not None:
+        # v1.3 — a flat series over the tape's own index. Stated loudly: this
+        # is an ASSUMPTION, and it is only legitimate because VIX here feeds
+        # the macro gates and the modelled premium, never permission.
+        vix_df = pd.DataFrame({"open": args.vix_const, "high": args.vix_const,
+                               "low": args.vix_const, "close": args.vix_const,
+                               "volume": 0.0}, index=df.index)
+        print(f"  ⚠️ NO VIX TAPE — assuming a flat VIX of {args.vix_const:.1f} "
+              f"for every bar. Macro gates and modelled premium are affected; "
+              f"permission and structure are not.")
+    else:
+        raise SystemExit("need --vix <csv> or --vix-const <n>")
     fed_days = set()
     for s in [x.strip() for x in args.fed_days.split(",") if x.strip()]:
         fed_days.add(datetime.strptime(s, "%Y-%m-%d").date())
@@ -460,7 +635,9 @@ def main():
                 "condor": IronCondorStrategy(),
                 "condor_mod": sys.modules["strategy.iron_condor_strategy"],
                 "stats": {n: {"evals": 0, "setups": 0, "valid": 0, "invalid": 0,
-                              "raised": 0, "last_error": "", "by_regime": {}}
+                              "raised": 0, "last_error": "", "by_regime": {},
+                              # v1.3 — the gate's verdict per setup
+                              "permitted": 0, "revoked": 0, "revoked_at": []}
                           for n in ("Continuation", "SweepReversal", "IronCondor")},
             }
             def _condor_run(rc_, vs_, sc_, macro_, price_, ts_):
@@ -473,7 +650,28 @@ def main():
             print(f"  (census disabled — {type(exc).__name__}: {exc})")
             _census = None
 
-    timeline = build_regime_timeline(df, vix_df, fed_days, cad, _census)
+    # ── v1.3 — the SMC core ───────────────────────────────────────────────
+    _smc = None
+    if args.engine == "smc":
+        try:
+            from smc.smc_engine import SMCEngine
+        except Exception as exc:                                # noqa: BLE001
+            raise SystemExit(f"--engine smc but the core will not import: "
+                             f"{type(exc).__name__}: {exc}")
+        # State must NOT persist between replays or a second run inherits the
+        # first one's swing book. state_dir=None keeps it in memory only.
+        _smc = SMCEngine(state_dir=None)
+        if cad != 1:
+            # Refused, not silently degraded: break detection is edge-triggered
+            # against the engine's own swing memory, so a skipped bar drops a
+            # crossing and the anticipation logic gets quietly worse.
+            print(f"  ⚠️ REGIME_REASSESS_MINUTES={cad}; forcing cadence 1 for "
+                  f"--engine smc (edge-triggered breaks need every closed bar)")
+            cad = 1
+        print(f"  engine: SMC (structural core) — labels and conviction come "
+              f"from smc/smc_engine.py, not the L1/L2 stack")
+
+    timeline = build_regime_timeline(df, vix_df, fed_days, cad, _census, _smc)
     dist = Counter(v[0] for v in timeline.values())
     tot = sum(dist.values())
     print(f"\n── REGIME DISTRIBUTION ({tot} evals @ {cad}-min) ──")
@@ -506,10 +704,42 @@ def main():
                 _top = sorted(_c["by_regime"].items(), key=lambda kv: -kv[1])[:4]
                 print(f"                 under: "
                       + "  ".join(f"{k}={v}" for k, v in _top))
+            if _c["permitted"] or _c["revoked"]:
+                _tot = _c["permitted"] + _c["revoked"]
+                print(f"                 SMC gate: permitted {_c['permitted']}"
+                      f"  REVOKED {_c['revoked']}"
+                      f"  ({100.0*_c['revoked']/max(1,_tot):.0f}% withdrawn)")
+                for _r in _c["revoked_at"][:5]:
+                    print(f"                   revoked {_r[0]} {_r[1]} "
+                          f"label={_r[2]} setup={_r[3]}/{_r[4]}")
+                if len(_c["revoked_at"]) > 5:
+                    print(f"                   … {len(_c['revoked_at'])-5} more")
             if _c["raised"]:
                 print(f"                 !! {_c['last_error'][:78]}")
         print(f"  Butterfly       excluded — needs a GEX pin; price-only tape "
               f"cannot provide one")
+
+    # ── v1.3 — the SMC setup lifecycle, which is the anticipatory half ─────
+    if _smc is not None:
+        print(f"\n── SMC SETUP LIFECYCLE ({len(_SMC_TRANSITIONS)} transitions) ──")
+        if not _SMC_TRANSITIONS:
+            print("  NONE. No setup ever formed — that is a finding, not a "
+                  "blank: check the raid depth and POI-approach priors before "
+                  "concluding anything about the tape.")
+        for _tr in _SMC_TRANSITIONS[:40]:
+            print(f"  {_tr[0]}  {_tr[1]:<10} {_tr[2]:<8} {_tr[3]:<6} "
+                  f"label={_tr[4]:<18} pos={_tr[5]:>6} {_tr[6]}")
+        if len(_SMC_TRANSITIONS) > 40:
+            print(f"  … {len(_SMC_TRANSITIONS)-40} more")
+        _ph = Counter(t[1] for t in _SMC_TRANSITIONS)
+        print("  phases: " + "  ".join(f"{k}={v}" for k, v in _ph.most_common()))
+        if _SMC_ERRORS:
+            print(f"\n  🔴 {len(_SMC_ERRORS)} SMC TICK ERROR(S) — the v1.3 label "
+                  f"stood on those bars, so this run is MIXED-ENGINE:")
+            for _e in _SMC_ERRORS[:5]:
+                print(f"     {_e}")
+        print("\n  ⚠️ OCCURRENCE ONLY. The chain is a modelled Black-Scholes "
+              "synth with no fill model — nothing above is a return.")
 
     print(f"\n── ORB (gate applied) ──")
     print(f"  setups detected: {len(setups)}   fired: {len(fired)}   blocked by regime gate: {blocked}")

@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.4
+# docs/BACKLOG.md — options_trader_smc — v1.5
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -141,6 +141,27 @@ fix here silently:**
    test_tcs_exit **v1.1**, with a comment/docstring-stripped source helper so
    an accurate changelog can never trip an absence canary — the SWP.1 lesson.
 
+**F.12 — [DESK] THE ACCEPTANCE REPLAY. Harness ✅ BUILT 2026-08-18
+(`tests/backtest_harness.py` v1.3); the RUN is still owed.**
+`--engine smc` drives the real SMC core from the same per-bar inputs the v1.3
+classifier uses and overrides the same boundary main.py overrides. It also asks
+`entry_permitted()` per census setup — without that the replay would show label
+changes and silently miss the withdrawal mechanism, which is the mechanism
+under test. Cadence is FORCED to 1 (edge-triggered breaks drop crossings on a
+sparse tape) and the tape is asserted to be Eastern (a UTC tape would put the
+ORB window in pre-market and produce a confident wrong answer).
+Run it as: `--symbol-glob '~/day_trader_pro/ohlc/*/QQQ_ohlc_*.csv'` with
+`--vix-const` or a VIX tape.
+**PRE-REGISTERED PASS CONDITION, unchanged and both halves required:**
+permission is withdrawn before the second and third QQQ 2026-08-17 morning
+entries using only tape available at each instant, AND is not withdrawn across
+the profitable trending sessions. A signal that revokes everything is not a
+signal. Report the bounded cost — trades taken between the range establishing
+and the revocation — rather than hiding it.
+⚠️ Occurrence only: the chain is a modelled BS synth with no fill model.
+⚠️ The ground truth (entry timestamps of those three trades) comes from the
+trade record, not from impression.
+
 ## PART 2 — DEFERRED, WITH THE GATE NAMED
 - **Sizing on structural confidence** — gated on the parent transition
   roadmap's five Phase-2 preconditions. Not before.
@@ -182,6 +203,9 @@ win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.5 — 2026-08-18** — F.12 opened with the acceptance-replay harness BUILT
+  (backtest_harness v1.3 + tests/test_harness_smc_mode.py); the run itself and
+  its pre-registered pass condition are recorded as owed.
 - **v1.4 — 2026-08-18** — F.11 opened and closed the same day: L1 hoisted out
   of the L2 branch (main v6.21) with an AST scope test; the SweepReversal
   arming decision recorded as owed.
