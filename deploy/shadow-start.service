@@ -1,0 +1,11 @@
+[Unit]
+Description=Start SHADOW observer for the trading session (holiday-gated)
+# Runs as root (no User=) so it can systemctl the observer. The observer itself
+# runs as ubuntu (set in shadow-observer.service).
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/options-trader
+# ExecCondition: skip (not fail) on weekends/holidays. Standalone stdlib script.
+ExecCondition=/usr/bin/python3 /home/ubuntu/options-trader/shadow/trading_day.py
+ExecStart=/usr/bin/systemctl start shadow-observer.service

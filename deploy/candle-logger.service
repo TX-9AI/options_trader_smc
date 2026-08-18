@@ -1,0 +1,19 @@
+[Unit]
+Description=OPT_Trader EOD 1-min candle logger (v3.0 — exports the shared feed store)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ── Set these to MATCH this box's trading unit (copy from optionsbot.service) ──
+User=ubuntu
+WorkingDirectory=/home/ubuntu/options-trader
+# v3.0: the logger is a store CONSUMER — no DXFeed session, no TT creds needed.
+# It only needs OT_INSTRUMENT (default symbol). Bars come from candle-feed.service.
+EnvironmentFile=/home/ubuntu/options-trader/.env
+# No --symbols / --out needed: defaults to this box's OT_INSTRUMENT, written to
+# <repo>/data/OHLC/<YYYY-MM-DD>/<SYMBOL>.csv. (Index boxes: symbology is set on
+# the FEED via OT_DXFEED_SYMBOL; bars are stored under the bot's symbol name.)
+ExecStart=/home/ubuntu/options-trader/venv/bin/python -m data.candle_logger
+
+# Output: <WorkingDirectory>/data/OHLC/<YYYY-MM-DD>/<SYMBOL>.csv

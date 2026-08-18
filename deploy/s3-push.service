@@ -1,0 +1,36 @@
+# options_trader_v3/deploy/s3-push.service — v1.2
+# v1.2 2026-08-13 — DEPRIORITISED. The OnBootSec catch-up fires while the EOD
+#   conductor is waiting on _produce/_poll_bars (PRODUCE_TIMEOUT=210s), so on a
+#   box with a large backlog the drain competed for CPU and disk during exactly
+#   the window the conductor needs the box responsive. Nothing depends on this
+#   push finishing quickly — it is archival — so it now runs at the back of the
+#   queue for both CPU and IO. Also the correct posture during RTH generally.
+# v1.1 2026-08-13 — TimeoutStartSec 240 -> 1800. 240 was guessed before any
+#   volume was known; the first fleet count showed a 110,639-object journal
+#   backlog, and a kill at 240s starved every stream ordered behind it.
+#   systemd skips a timer trigger while the oneshot is still running, so a
+#   long drain cannot pile up overlapping instances.
+# 2026-08-12 — initial release. Box-side warehouse pusher (chain snapshots).
+# Oneshot, driven by s3-push.timer. Runs under SYSTEM python: boto3 is present
+# there fleet-wide and absent from the bot venv, and this must never depend on
+# the venv. Touches no bot unit and requires no bot restart.
+[Unit]
+Description=Vertigo warehouse push (chain snapshots -> S3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/options-trader
+Environment=OT_S3_BUCKET=vertigo-warehouse-tx9ai
+Environment=OT_S3_REGION=us-east-2
+Environment=OT_S3_PREFIX=raw
+Environment=OT_S3_PUSH=1
+ExecStart=/usr/bin/python3 /home/ubuntu/options-trader/warehouse/s3_push.py
+# Never let a stuck network call pile up runs behind it.
+# Archival work must never compete with trading or candle collection.
+Nice=15
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+TimeoutStartSec=1800

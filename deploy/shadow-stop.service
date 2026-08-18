@@ -1,0 +1,8 @@
+[Unit]
+Description=Stop SHADOW observer at end of session
+
+[Service]
+Type=oneshot
+# Manual stop overrides the observer's Restart=always — it stays down until the
+# next morning's start timer.
+ExecStart=/usr/bin/systemctl stop shadow-observer.service

@@ -1,0 +1,74 @@
+# options_trader_v3/.gitignore
+# 2026-08-13 — repaired three defects found while inventorying box artifacts:
+#   (1) `*.ziptrades.db-shm` was a MISSING NEWLINE, so `*.zip` was never actually
+#       ignored and `trades.db-shm` was only covered by the earlier `*.db-shm`.
+#   (2) `orb_range.json echo analysis/orb_range.json` captured a stray `echo`
+#       from a bad `>>` append; it matched a filename nobody will ever create.
+#   (3) `data/feed_store.db` was NOT ignored while `trades.db` was — a `git add -A`
+#       on a box would have committed a multi-MB binary SQLite DB.
+# Secrets — never commit these
+credentials.py
+cred.txt
+# One-shot deploy bootstrap holding real secrets — never commit. Any bootstrap*.sh
+# is ignored EXCEPT the placeholder template, which is the committed reference.
+bootstrap*.sh
+!bootstrap.example.sh
+*.pem
+*.key
+*.env
+
+# Database and logs — generated at runtime
+trades.db
+data/feed_store.db
+bot.log
+*.log
+*.log.*
+*.db-shm
+*.db-wal
+
+# Candle logger output — generated at runtime (in-project data dir)
+data/OHLC/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
+trades.db-shm
+trades.db-wal
+orb_range.json
+orb_state.json
+ohlc/
+*.csv
+
+# Shadow observer output — generated at runtime (in-project data dir)
+data/shadow/
+data/signal_journal/
+# LIQ.4 output - written every closed bar once the ledger is live.
+# NOT scaffolding to clean up: it is the running record. It must never be
+# committed, and `git add -A` in a deploy line would sweep it in.
+data/liquidity_ledger/
+*.patch
+data/chain_snapshots/
+MANIFEST.txt
+
+# 2026-08-18 (fork): SMC core book — per-box state, never committed
+data/smc_state.json

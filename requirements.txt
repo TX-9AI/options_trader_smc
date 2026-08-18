@@ -1,0 +1,31 @@
+# TastyTrade official community SDK (OAuth, DXLink streamer, orders)
+tastytrade>=12.4.0
+
+# HTTP and async (required by tastytrade SDK)
+requests>=2.31.0   # UNDECLARED until 2026-07-31. data/macro_data.py has always
+                   # imported it; it survived because the boxes pull it in
+                   # transitively via another package. In a clean venv the whole
+                   # repo fails to import — which is what made control's pytest
+                   # unusable for weeks and got misdiagnosed as a pytest problem.
+httpx>=0.27.0
+anyio>=4.0.0
+
+# Market data: single shared TastyTrade/DXFeed candle store (data/candle_feed.py)
+# — no external market-data dependency; sqlite3 is stdlib.
+
+# Data / analysis
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Timezone handling
+pytz>=2024.1
+
+# Alerts: Telegram only (notifications/telegram_sender.py). Twilio/SMS was removed
+# in v2.0 but the dependency was left behind until v3.1 — it is not imported by any
+# module in this tree.
+pyflakes  # tests/test_no_undefined_names.py — the 07-29/07-30 NameError gate
+pytest    # tests/ suite. NOT the box deploy gate (that is `python -c "import ast"`
+          # by design), but control needs it or `python -m pytest tests/` fails
+          # with "No module named pytest" — which it did repeatedly through late
+          # July because nothing provisioned it and ~/.bashrc activates the
+          # day_trader_pro venv by default.

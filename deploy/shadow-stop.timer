@@ -1,0 +1,9 @@
+[Unit]
+Description=Fire SHADOW observer stop at 16:30 ET, Mon-Fri
+
+[Timer]
+OnCalendar=Mon-Fri *-*-* 16:30:00 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target

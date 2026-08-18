@@ -1,0 +1,25 @@
+# deploy/candle-feed.service — options_trader v3.0
+# THE single TastyTrade/DXFeed candle producer for this box (Yahoo-Finance
+# purge, Mandate 2: one DXLink subscription per box; every consumer reads the
+# SQLite store). setup_ec2.sh v3.2 generates this unit with the box's env
+# inline — this file is the reference copy for manual installs.
+[Unit]
+Description=options_trader v3.0 — single TastyTrade candle feed (DXFeed producer)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/options-trader
+# Needs the same TT_* credentials as the bot (its own process = its own OAuth
+# session; the DXFeed SUBSCRIPTION is what must remain singular on the box).
+EnvironmentFile=/home/ubuntu/options-trader/.env
+ExecStart=/home/ubuntu/options-trader/venv/bin/python -m data.candle_feed
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=candle-feed
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Fire SHADOW observer start at 09:00 ET, Mon-Fri
+
+[Timer]
+# Timezone-aware OnCalendar (systemd >= 252 / Ubuntu 24). If your systemd is
+# older and rejects the TZ suffix, either set the box TZ to America/New_York
+# (sudo timedatectl set-timezone America/New_York) and drop the suffix, or
+# convert to the box's local time.
+OnCalendar=Mon-Fri *-*-* 09:00:00 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target

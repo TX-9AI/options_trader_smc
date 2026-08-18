@@ -1,0 +1,39 @@
+# D (2026-07-31) — TEMPLATED. __INSTALL_DIR__ is substituted at install time by
+# `shadow_devtools.sh` option 11, mirroring how setup_ec2.sh writes
+# optionsbot.service with ${INSTALL_DIR}. The path was hardcoded to
+# /home/ubuntu/options-trader, so this unit silently pointed at the canonical
+# path no matter where it was installed — a no-op on the fleet (which uses that
+# path) and a broken observer anywhere else, including the tester.
+# DO NOT install this file directly; it will not run with the placeholder in it.
+[Unit]
+Description=OPT_Trader SHADOW observer (observe-only conviction scoring — places NO orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ── Set these to MATCH this box's trading unit (copy from optionsbot.service) ──
+User=ubuntu
+WorkingDirectory=__INSTALL_DIR__
+# The observer needs the SAME environment as the bot — at minimum OT_INSTRUMENT
+# (so it observes this box's symbol) plus the Tastytrade creds the quote
+# fallback path may touch. This fleet keeps env INLINE in optionsbot.service's
+# Environment= lines (no .env file): COPY THOSE Environment= LINES IN HERE,
+# then add the shadow stage below.
+#
+# Environment=OT_INSTRUMENT=...        <- copy from optionsbot.service
+# Environment=...                      <- copy remaining lines from optionsbot.service
+#
+# Build-order staging (see shadow/observer.py header):
+#   1 = primitives measure-only (default; verify velocity for a few sessions)
+#   2 = enable scorers + would-fire threshold logging (still zero firing)
+Environment=OT_SHADOW_STAGE=1
+
+ExecStart=__INSTALL_DIR__/venv/bin/python -m shadow.observer
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
