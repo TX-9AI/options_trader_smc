@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.2
+# docs/BACKLOG.md — options_trader_smc — v1.3
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -117,6 +117,30 @@ fleet stops printing `🚨 NOT converged` on every run — the cry-wolf class
 `push.sh --deploy` parses the repo from the box's own remote. Verified by
 reading both, 2026-08-18.
 
+**F.10 — [DESK] UPSTREAM PORT LEDGER. The parent moved the day we forked.**
+The fork's baseline is options_trader_v3 `0720753`. Every parent commit after
+it is a conscious PORT-or-DECLINE, recorded here — silence is how two repos
+become two different programs nobody can compare.
+
+| parent commit | what | decision |
+|---|---|---|
+| `5b9e71f` main v6.18 P0 ctx fix | run_analysis NameError | already in the fork (it originated here) |
+| `2cae11b` TC.6 v1.5 strike selection | short strike = FIRST strike INSIDE the ORB range; quote-width gate dropped for mark-or-better fills | **PORTED 2026-08-18** as trend_credit_spread **v2.2** |
+
+⚠️ **Two parent-side defects found while porting — report upstream, do not
+fix here silently:**
+1. `2cae11b` did NOT bump `strategy/trend_credit_spread.py`'s header; the
+   parent's title still reads v2.1 — 2026-08-14 while the file contains v1.5
+   behaviour. Same stale-title class as the 07-23 sweep.
+2. `2cae11b` shipped with **its own guard suite red**: three canaries in
+   `tests/test_tcs_exit.py` pinned the exact source lines the rewrite deleted,
+   and they fail against parent HEAD today. Verified by running the suite
+   against `2cae11b` before touching anything. Re-pinned here to the
+   PROPERTIES (absence of `min_dist`, of `select_beyond_rail(`, of a
+   `bound, extreme` tuple; presence of the inside-range constraint) in
+   test_tcs_exit **v1.1**, with a comment/docstring-stripped source helper so
+   an accurate changelog can never trip an absence canary — the SWP.1 lesson.
+
 ## PART 2 — DEFERRED, WITH THE GATE NAMED
 - **Sizing on structural confidence** — gated on the parent transition
   roadmap's five Phase-2 preconditions. Not before.
@@ -139,6 +163,10 @@ reading both, 2026-08-18.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.3 — 2026-08-18** — F.10 upstream port ledger opened; TC.6 v1.5 ported
+  from parent `2cae11b` (trend_credit_spread v2.2, test_tcs_exit v1.1). Two
+  parent-side defects recorded for upstream: a stale file header and a guard
+  suite left red by that commit.
 - **v1.2 — 2026-08-18** — F.2a BUILT (trade_logger v3.16 + main v6.20 +
   tests/test_engine_provenance.py) and marked so; F.2's remaining steps are
   now purely operational. Control-side bake/repoint guards recorded as F.9,

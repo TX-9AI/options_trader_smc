@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 """
-tests/test_tcs_exit.py — v1.0 — 2026-08-13   (TC.6)
+tests/test_tcs_exit.py — v1.1 — 2026-08-18   (TC.6)
+
+v1.1 — 2026-08-18 — THREE CANARIES WENT RED AGAINST TC.6 v1.5 AND THE
+       INVARIANTS THEY GUARD ARE STILL TRUE. They pinned deleted LINES —
+       `min_dist = float("inf") …` and `side, bound, extreme = …` — rather
+       than the properties those lines expressed, so the strike-selection
+       rewrite (parent `2cae11b`, ported here as trend_credit_spread v2.2)
+       turned them red while nothing they exist to prevent had happened.
+       ⚠️ THE PARENT SHIPPED THAT COMMIT WITH THIS SUITE RED; the same three
+       fail against options_trader_v3 @ 2cae11b, verified before touching
+       them here. Re-pinned to the properties: no EM floor, no rail/min-dist
+       selector, no `extreme` displacing the bound, and the bound still being
+       the ORB level. THE ASSERTIONS ARE STRONGER NOW, NOT WEAKER — an
+       absence canary cannot be satisfied by a rename.
+v1.0 — 2026-08-13 — first cut.
 
 Operator's spec: *"Exit should be breached (loss) or nickel close (profit)."*
 No premium stop, no ratchet — and that is not a simplification. **The measured
@@ -244,6 +258,27 @@ def tcs_src():
                              "trend_credit_spread.py"), encoding="utf-8").read()
 
 
+def tcs_code():
+    """v1.1 — EXECUTABLE LINES ONLY: module docstring and comments removed.
+
+    An ABSENCE canary run against raw source is unusable here, because the
+    file's own changelog and comments legitimately NAME the things that must
+    not be CALLED ("`select_beyond_rail` bounded only ONE side…"). Grepping
+    the whole file makes an accurate historical note look like a regression —
+    the SWP.1 lesson. Strip the prose, then assert.
+    """
+    import ast
+    src = tcs_src()
+    tree = ast.parse(src)
+    body = tree.body
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        src = "\n".join(src.splitlines()[body[0].end_lineno:])
+    return "\n".join(l for l in src.splitlines()
+                      if not l.lstrip().startswith("#"))
+
+
 def test_no_em_floor_can_override_the_orb_bound():
     """DIS-INHERITED FROM THE CONDOR. `_select_beyond_rail` requires a strike to
     clear BOTH the rail and the min-distance, so whichever is further out wins.
@@ -251,7 +286,14 @@ def test_no_em_floor_can_override_the_orb_bound():
     operator's level — a FITTED PERCENTAGE overriding a STRUCTURAL one."""
     s = tcs_src()
     assert "CONDOR_EM_FLOOR_FRAC" not in s
-    assert 'min_dist = float("inf") if side == "put" else float("-inf")' in s
+    # v1.1 — the sentinel is gone because the SELECTOR is gone (TC.6 v1.5:
+    # the strike is named outright, not searched for beyond a rail). Pin the
+    # ABSENCE of any distance-based displacement instead of the sentinel line.
+    code = tcs_code()
+    assert "min_dist" not in code, "a min-distance filter is back — it can " \
+                                   "only push the strike past the level"
+    assert "select_beyond_rail(" not in code, "TC.6 selects by exact strike; " \
+                                              "a rail search lets liquidity choose"
 
 
 def test_price_must_be_outside_the_range_at_entry():
@@ -282,8 +324,13 @@ def test_the_not_exceeded_filter_is_dis_inherited():
     Safety is carried by POP >= 0.70 and the joint EV test, which ask the same
     question in sigma*sqrt(T) terms FROM NOW rather than backward-looking."""
     s_ = tcs_src()
-    assert 'side, bound, extreme = "put", orb_high, None' in s_
-    assert 'side, bound, extreme = "call", orb_low, None' in s_
+    # v1.1 — `extreme` was dropped from the tuple entirely by TC.6 v1.5, which
+    # is a STRONGER form of dis-inheritance than passing None.
+    assert 'side, bound = "put", orb_high' in s_
+    assert 'side, bound = "call", orb_low' in s_
+    _code = tcs_code()
+    assert "bound, extreme" not in _code and "extreme =" not in _code, \
+        "the session-extreme filter is back in the code body"
 
 
 def test_the_arithmetic_that_made_the_bound_decorative():
@@ -303,9 +350,13 @@ def test_the_bound_is_the_orb_level_and_it_is_sovereign():
     Nothing else may displace it: `extreme` is None, and the EM floor is a
     non-binding sentinel."""
     s_ = tcs_src()
-    assert 'side, bound, extreme = "put", orb_high, None' in s_
-    assert 'side, bound, extreme = "call", orb_low, None' in s_
-    assert 'min_dist = float("inf") if side == "put" else float("-inf")' in s_
+    assert 'side, bound = "put", orb_high' in s_
+    assert 'side, bound = "call", orb_low' in s_
+    # v1.1 — nothing may displace the bound: no session extreme, no min
+    # distance, and the strike is chosen INSIDE the range the bound defines.
+    assert "min_dist" not in tcs_code()
+    assert "_lo <= float(c.strike) <= _hi" in s_, \
+        "the strike is no longer constrained to lie INSIDE the range"
 
 
 # ── TCS.1 de-coupling ──────────────────────────────────────────────────────
