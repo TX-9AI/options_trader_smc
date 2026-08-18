@@ -1,5 +1,20 @@
 """
-main.py — options_trader_smc v6.20
+main.py — options_trader_smc v6.21
+v6.21  2026-08-18  🔴 LAYER-1 HOISTED OUT OF THE L2 BRANCH — two regressions
+       the SMC wiring introduced silently, neither about the label.
+       (1) SweepReversal COULD NOT FIRE under the smc engine: its dispatch
+       gates on ctx["l1"].scores["SWEEP_REVERSAL"] (SWP.1 deliberately stopped
+       requiring the LABEL), and ctx["l1"] was only ever assigned inside the
+       `_REGIME_ENGINE == "l2"` branch — so the score read 0.0 on every tick.
+       Off by construction, not by decision. (2) regime.flat_angle_deg fell
+       back to its default for five strategies + entry_engine, re-opening the
+       bug STR.2 had just closed. Also _l1_scores(ctx) returned None, omitting
+       the regime-axes decomposition from every journal row this box wrote.
+       The scorer produces SETUP SCORES and structural telemetry, not the
+       committed label, so it now runs ABOVE the engine branch for every
+       engine. L2 is unchanged: same inputs, same call, same position relative
+       to the v1.3 classification; it consumes the hoisted result and raises
+       into its own existing handler if the scorer failed.
 v6.20  2026-08-18  F.2a — ENTRY-CORE PROVENANCE ON THE TRADE ROW. The engine
        is RESOLVED once at import (accounting for a failed smc import falling
        back to L2/v13 — the tag says what RAN, not what was asked for) and
@@ -1229,6 +1244,69 @@ def run_regime_classification(ctx: dict, trigger: str, state: BotState) -> Regim
     )
     state.last_regime_at = now_utc()
 
+    # ── v6.21 — LAYER-1 IS ENGINE-INDEPENDENT. RUN IT BEFORE THE BRANCH. ─────
+    # 🔴 The v6.19 wiring left the L1 scorer call inside the `_REGIME_ENGINE ==
+    # "l2"` branch, where it had always lived. Two things silently broke the
+    # moment the fork's default became "smc", and NEITHER is about the label:
+    #   1. `ctx["l1"]` was never set, so the SweepReversal dispatch — which
+    #      gates on `ctx["l1"].scores["SWEEP_REVERSAL"] >= SWEEP_SETUP_FLOOR`
+    #      since SWP.1 deliberately stopped requiring the LABEL — read 0.0 on
+    #      every tick. SweepReversal could not fire at all: OFF BY
+    #      CONSTRUCTION, not by decision.
+    #   2. `regime.flat_angle_deg` fell back to its default for the five
+    #      strategies and entry_engine that read it — re-opening the exact bug
+    #      STR.2 had just closed, in a different way.
+    # Also `_l1_scores(ctx)` returned None, so the regime-axes decomposition
+    # was absent from every journal row this box wrote.
+    # THE SCORER IS NOT THE COMMITTED LABEL. It produces per-regime SETUP
+    # SCORES and structural telemetry that the dispatch and the journal
+    # consume regardless of which engine commits the label — so it belongs
+    # ABOVE the branch. L2 behaviour is unchanged: it consumes the same
+    # `_l1_res` from the same inputs, computed after the v1.3 classification
+    # exactly as before.
+    _l1_res = None
+    if _l1_scorer is not None:
+        try:
+            closes = None
+            df1m = ctx.get("df_1m")
+            if df1m is not None and len(df1m) >= RANGE_WINDOW_BARS:
+                closes = df1m["close"].tolist()[-RANGE_WINDOW_BARS:]
+            atr = getattr(ctx["vol"], "atr_current", None)
+            _l1_res = _l1_scorer.score(ctx["vol"], ctx["trend"],
+                                       ctx["structure"], ctx["liq_map"],
+                                       closes=closes, atr=atr)
+            ctx["l1"] = _l1_res
+
+            # ── STR.2 (2026-08-18) — CARRY THE ANGLE TO THE CONSUMER ─────────
+            # ⚠️ FIVE STRATEGIES READ `regime.flat_angle_deg` and all five were
+            # taking the default, because RegimeState had no such attribute.
+            # `regime_confluence.flat_angle_deg()` computes it on every
+            # RANGING/COMPRESSION evaluation and drops it into the breakdown as
+            # {"angle": ...} — computed, recorded in the evidence, never
+            # delivered. Same shape as `direction_conf`.
+            # ⚠️ THE ANGLE IS A STRUCTURAL READ, not a magnitude one: the slope
+            # of the recent window in ATR units — the closest thing collected
+            # to "is price going anywhere or just rotating", which is the class
+            # the operator reads charts with and the class the separation probe
+            # has never been able to test.
+            try:
+                _bd_all = _l1_res.breakdown or {}
+                for _k in ("RANGING", "COMPRESSION"):
+                    _a = (_bd_all.get(_k) or {}).get("angle")
+                    if _a is not None:
+                        regime.flat_angle_deg = float(_a)
+                        break
+            except Exception:                                  # noqa: BLE001
+                pass          # telemetry must never break the regime path
+        except Exception as _l1e:                              # noqa: BLE001
+            # A scorer failure must not kill classification under ANY engine.
+            # L2 handles a None _l1_res below by raising into its own except,
+            # which is the same path it took when the score() call failed here
+            # before the hoist — identical behaviour, one level up.
+            _l1_res = None
+            logger.error("L1 scorer failed (%s) — no setup scores this tick "
+                         "(SweepReversal cannot fire, axes omitted)", _l1e)
+
     # ── v6.19 — SMC OVERRIDE (fork): the structural core drives the gate ──────
     # Parallel to the L2.5 branch below and mutually exclusive with it. The
     # v1.3 classifier above still runs and populates RegimeState's rich fields
@@ -1284,46 +1362,17 @@ def run_regime_classification(ctx: dict, trigger: str, state: BotState) -> Regim
     l2_label = None
     l2_conv  = None
     _l1_fallback = False          # RGM.6 — did we resolve via the L1 argmax?
-    _l1_res = None                # RGM.6 — referenced by the fallback rung
+    # v6.21 — `_l1_res` is now bound ABOVE the branch (engine-independent) and
+    # must NOT be re-initialised to None here; the fallback rung still reads it.
     if _REGIME_ENGINE == "l2" and _L2_OK:      # v4.7 — value is .lower()ed
         try:
-            closes = None
-            df1m = ctx.get("df_1m")
-            if df1m is not None and len(df1m) >= RANGE_WINDOW_BARS:
-                closes = df1m["close"].tolist()[-RANGE_WINDOW_BARS:]
-            atr = getattr(ctx["vol"], "atr_current", None)
-            # v5.6 (SWP.1) — capture the FULL result, not just the vector.
-            # `evidence()` already called `score()` internally, so taking the
-            # result object costs nothing and gives dispatch the per-regime
-            # SETUP SCORES. The sweep gate reads SWEEP_REVERSAL from here
-            # instead of requiring that label to win the L2 argmax.
-            _l1_res  = _l1_scorer.score(ctx["vol"], ctx["trend"],
-                                        ctx["structure"], ctx["liq_map"],
-                                        closes=closes, atr=atr)
-            ctx["l1"] = _l1_res
+            # v5.6 (SWP.1) — the FULL result, not just the vector: it gives
+            # dispatch the per-regime SETUP SCORES, so the sweep gate does not
+            # need that label to win the L2 argmax. v6.21 — computed above.
+            if _l1_res is None:
+                raise RuntimeError("L1 scorer unavailable — see the error "
+                                   "logged above; L2 cannot commit without it")
             evidence = _l1_res.evidence()
-
-            # ── STR.2 (2026-08-18) — CARRY THE ANGLE TO THE CONSUMER ─────────
-            # ⚠️ FIVE STRATEGIES ALREADY READ `regime.flat_angle_deg` and all
-            # five were taking the default, because RegimeState had no such
-            # attribute. `regime_confluence.flat_angle_deg()` computes it on
-            # every RANGING/COMPRESSION evaluation and drops it into the
-            # breakdown as {"angle": ...} — **computed, recorded in the
-            # evidence, never delivered.** Same shape as `direction_conf`.
-            # ⚠️ THE ANGLE IS A STRUCTURAL READ, not a magnitude one: it is the
-            # slope of the recent window in ATR units, which is the closest
-            # thing collected to "is price going anywhere or just rotating."
-            # That is the class the operator reads charts with and the class the
-            # separation probe has never been able to test.
-            try:
-                _bd_all = _l1_res.breakdown or {}
-                for _k in ("RANGING", "COMPRESSION"):
-                    _a = (_bd_all.get(_k) or {}).get("angle")
-                    if _a is not None:
-                        regime.flat_angle_deg = float(_a)
-                        break
-            except Exception:                                  # noqa: BLE001
-                pass          # telemetry must never break the regime path
 
             st = _l2_integ.update(now_utc().timestamp(), evidence)
             # persist the book so a mid-session restart doesn't reset conviction

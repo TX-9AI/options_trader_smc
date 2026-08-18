@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.3
+# docs/BACKLOG.md — options_trader_smc — v1.4
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -150,6 +150,25 @@ fix here silently:**
   relabeled gates) — gated on F.5 passing and F.4 fitted bounds.
 - **Killzone-conditional gating** — journal first; the windows already gate.
 
+**F.11 — [DESK] ✅ FIXED 2026-08-18 (main v6.21), BEFORE THE FIRST SMC SESSION.
+Two silent regressions the v6.19 wiring introduced, neither about the label.**
+The L1 scorer call sat inside the `_REGIME_ENGINE == "l2"` branch, where it
+had always lived, so under the fork's default engine: (a) `ctx["l1"]` was
+never set and **SweepReversal could not fire at all** — its dispatch gates on
+`ctx["l1"].scores["SWEEP_REVERSAL"]` because SWP.1 deliberately stopped
+requiring the label — and (b) `regime.flat_angle_deg` reverted to its default
+for five strategies + entry_engine, re-opening STR.2's bug by another route.
+`_l1_scores(ctx)` also returned None, omitting the regime-axes decomposition
+from every journal row. Hoisted above the branch; L2 consumes the same result
+and fails closed if the scorer is unavailable. `tests/test_l1_engine_independent.py`
+asserts the SCOPE property by AST, fails against the pre-hoist file, and has a
+deliberate-failure mode.
+⚠️ **Live proof is still owed and belongs to the first session:** a NON-ZERO
+`SWEEP_REVERSAL` setup score in the journal and a `flat_angle_deg` that is not
+the default. The test proves placement, not usefulness.
+⚠️ **DECISION OWED ON SWEEP:** it can now fire again, and its measured live
+win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -163,6 +182,9 @@ fix here silently:**
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.4 — 2026-08-18** — F.11 opened and closed the same day: L1 hoisted out
+  of the L2 branch (main v6.21) with an AST scope test; the SweepReversal
+  arming decision recorded as owed.
 - **v1.3 — 2026-08-18** — F.10 upstream port ledger opened; TC.6 v1.5 ported
   from parent `2cae11b` (trend_credit_spread v2.2, test_tcs_exit v1.1). Two
   parent-side defects recorded for upstream: a stale file header and a guard
