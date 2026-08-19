@@ -1,5 +1,26 @@
 """
-execution/exit_engine.py — v4.22  2026-08-15  AUDIT F7: the BREAKOUT_VOLATILE exemption was scoped to
+execution/exit_engine.py — v4.23  2026-08-19  ICT EXIT BRANCH — the suite's own
+        invalidation is now READ. Before this, every ICT strategy fell through
+        the router's `else` into _evaluate_sweep, which does not reference
+        `underlying_stop` anywhere in its 94 lines. So a setup computed its
+        structural stop (SweepMSS: the raid's wick extreme), setup_base
+        validated the level's coherence, entry_engine wrote it to the record —
+        and the trade was then managed on the 40% premium floor plus a generic
+        BOS check while the thesis invalidation sat unread. Price could close
+        back through the purged level with the position still open, and it
+        would have presented as "the setup doesn't work" rather than as a
+        wiring gap. Same class as the sweep gate and the flat angle: carried
+        correctly right up to the consumer.
+        `_evaluate_ict` evaluates the STRUCTURE FIRST (close-based on the last
+        CLOSED 1m bar, so a wick through the swept level survives — a wick is
+        a raid, a close is acceptance), keeps the premium floor underneath as
+        a backstop, treats reaching the opposing draw as runner mode rather
+        than a hard TP, and inherits hard-close, theta-bleed and the FVG trail
+        unchanged. Routed by PREFIX (`strategy.startswith("ICT")`) so a setup
+        added later cannot inherit the wrong evaluator by being forgotten in
+        an enumeration. Legacy routing is untouched: SweepReversal and every
+        other directional still land in _evaluate_sweep exactly as before.
+v4.22  2026-08-15  AUDIT F7: the BREAKOUT_VOLATILE exemption was scoped to
         `_breakout` records only, so a standalone/handoff continuation that
         ACCELERATED into a breakout IN ITS OWN DIRECTION was closed as a
         regime_flip while a breakout record survived the identical tape.
@@ -733,6 +754,10 @@ class ExitEngine:
         self._trail_active: dict = {}
         self._bos_trackers: dict = {}   # trade_id \u2192 BOSTracker (sweep only)
         self._post_target_trail: dict = {}   # trade_id \u2192 bool (ORB only)
+        # v4.23 — one error per trade, not one per tick, when an ICT record
+        # arrives with no invalidation. A per-tick error would bury the log
+        # and train the reader to skip it.
+        self._ict_no_stop_warned: dict = {}
         # VEL.1 - consecutive velocity breaches per trade. WITHOUT THIS the
         # check AttributeErrors on first call and the except swallows it,
         # leaving a permanent silent no-op.
@@ -816,6 +841,21 @@ class ExitEngine:
             return self._evaluate_continuation(record, current_premium, df_1m,
                                                df_5m=df_5m, regime=regime,
                                                vol_state=vol_state, trend=trend)
+        elif strategy.startswith("ICT"):
+            # v4.22 — THE ICT SETUPS MANAGE ON THEIR OWN INVALIDATION.
+            # Before this branch they fell to the `else` below, and
+            # _evaluate_sweep does not read `underlying_stop` AT ALL — 94 lines,
+            # zero references. So every ICT setup computed a structural stop
+            # (SweepMSS: the raid's wick extreme), setup_base validated its
+            # coherence, entry_engine wrote it to the record, and the exit
+            # engine then managed the trade on a 40% premium floor while the
+            # thesis invalidation sat unread on the row. Price could close
+            # straight back through the purged level with the position still
+            # open. Same failure class as the sweep gate and the flat angle:
+            # carried correctly right up to the consumer.
+            # Prefix match, not a name list: a strategy added later must not
+            # inherit the wrong evaluator by being forgotten in an enumeration.
+            return self._evaluate_ict(record, current_premium, df_1m, df_5m)
         else:
             # SweepReversal and any other directional strategies
             return self._evaluate_sweep(record, current_premium, df_1m, df_5m)
@@ -1324,6 +1364,135 @@ class ExitEngine:
         trail_stop = self._update_trail(
             trade_id, current_premium, entry_prem, trail_act, stop_prem
         )
+        trail_stop = self._trail_stops.get(trade_id, trail_stop)
+        if trail_stop is not None:
+            if current_premium <= trail_stop:
+                decision.should_exit = True
+                decision.exit_reason = f"trail_stop_hit pnl={pnl_pct:.1%}"
+                return decision
+            decision.new_trail_stop = trail_stop
+
+        return decision
+
+    # ─── ICT Exit (v4.22) ──────────────────────────────────────────────
+
+    def _evaluate_ict(self, record: TradeRecord,
+                      current_premium: float,
+                      df_1m: Optional[pd.DataFrame],
+                      df_5m: Optional[pd.DataFrame] = None) -> ExitDecision:
+        """Exit logic for the ICT setup suite (strategy/ict, F.13).
+
+        THE ORDERING PRINCIPLE: an ICT trade is a claim about a LEVEL — the
+        raid's wick extreme, the failed order block, the origin of the
+        displacement leg. When price closes back through that level the claim
+        is dead, and it is dead whether or not the premium has noticed yet.
+        So the structural stop is evaluated BEFORE the premium floor, and the
+        premium floor remains underneath as a backstop for the case the
+        structure never resolves but the dollars are gone anyway. The two are
+        an AND, not an OR — the same relationship _evaluate_orb documents.
+
+        CLOSE-BASED, ON THE LAST CLOSED BAR (iloc[-2]), exactly as the ORB
+        structure stop is: an intrabar wick through the level survives, only a
+        confirmed close past it exits. The operator's standing rule is that a
+        wick is a raid and a close is acceptance — and an ICT setup that
+        stopped out on its own liquidity sweep's wick would be a parody of
+        itself.
+
+        THE TARGET IS THE OPPOSING DRAW, not a premium multiple. `_levels()`
+        put it on the record as `underlying_target`; reaching it is the thesis
+        completing, so the trade converts to the shared post-target trail
+        rather than taking a fixed profit — same treatment ORB and sweep get.
+
+        Everything else is inherited deliberately: hard close, theta bleed,
+        the FVG-anchored trail. Exits were left untouched by the retool
+        because they are the measured winners; this branch adds the structural
+        stop the suite already computes and nothing else.
+        """
+        decision   = ExitDecision()
+        trade_id   = record["trade_id"]
+        entry_prem = record["entry_premium"]
+        stop_prem  = record["stop_premium"]
+        target     = record["target_premium"]
+        trail_act  = record["trail_activation"]
+        direction  = record.get("direction", "long")
+
+        pnl_pct = (current_premium - entry_prem) / entry_prem if entry_prem > 0 else 0
+        pnl_usd = (current_premium - entry_prem) * record["contracts"] * CONTRACT_MULTIPLIER
+        decision.current_pnl_pct = pnl_pct
+        decision.current_pnl_usd = pnl_usd
+
+        # 1. HARD CLOSE
+        if is_hard_close_time():
+            decision.should_exit = True
+            decision.exit_reason = "hard_close_15:45_ET"
+            return decision
+
+        # 2. STRUCTURAL STOP — the level the setup named. FIRST, because the
+        #    thesis dies at the level, not at a percentage.
+        stop_level = float(record.get("underlying_stop", 0.0) or 0.0)
+        if stop_level > 0 and df_1m is not None and len(df_1m) >= 2:
+            last_close = float(df_1m.iloc[-2]["close"])
+            breached = ((direction == "long" and last_close < stop_level) or
+                        (direction == "short" and last_close > stop_level))
+            if breached:
+                decision.should_exit = True
+                decision.exit_reason = (
+                    f"ict_structure_stop: 1m close {last_close:.2f} "
+                    f"{'below' if direction == 'long' else 'above'} "
+                    f"invalidation {stop_level:.2f}")
+                logger.info("ICT STOP: %s close=%.2f vs invalidation=%.2f — "
+                            "the swept level was reclaimed against us",
+                            trade_id[:8], last_close, stop_level)
+                return decision
+        elif stop_level > 0:
+            # An invalidation we cannot evaluate is INERT, and an inert stop
+            # must never look like a passing check (the tcs_breach lesson).
+            logger.warning("[ict] no 1m tape — the structural stop at %.2f is "
+                           "INERT for %s; only the premium floor is live",
+                           stop_level, trade_id[:8])
+        elif not self._ict_no_stop_warned.get(trade_id):
+            # A missing stop means setup_base's coherence check was bypassed
+            # somehow. Say it once per trade rather than every tick.
+            self._ict_no_stop_warned[trade_id] = True
+            logger.error("[ict] %s carries NO underlying_stop — managing on "
+                         "the premium floor alone, which is not the design",
+                         trade_id[:8])
+
+        # 3. PREMIUM FLOOR — the backstop, underneath the structure.
+        if current_premium <= stop_prem:
+            decision.should_exit = True
+            decision.exit_reason = f"stop_hit pnl={pnl_pct:.1%}"
+            return decision
+
+        # 4. TARGET = the opposing draw reached -> runner mode, not a hard TP.
+        if current_premium >= target:
+            if not self._post_target_trail.get(trade_id, False):
+                self._post_target_trail[trade_id] = True
+                logger.info("ICT TARGET REACHED (runner mode): %s pnl=%.1f%%",
+                            trade_id[:8], pnl_pct * 100)
+            trail_stop = self._update_post_target_trail(
+                trade_id, current_premium, record,
+                self._fvg_frame(df_1m, df_5m), direction)
+            if trail_stop is not None:
+                if current_premium <= trail_stop:
+                    decision.should_exit = True
+                    decision.exit_reason = f"post_target_trail pnl={pnl_pct:.1%}"
+                    return decision
+                decision.new_trail_stop = trail_stop
+            return decision
+
+        # 5. THETA BLEED — a profitable trade whose gain is about to evaporate.
+        if self._theta_bleed(record, current_premium, pnl_pct):
+            decision.should_exit = True
+            decision.exit_reason = f"theta_bleed pnl={pnl_pct:.1%}"
+            return decision
+
+        # 6. TRAIL — FVG-anchored once armed, plus the % trail; higher governs.
+        if pnl_pct >= FVG_TRAIL_ARM_PCT:
+            self._update_fvg_trail(trade_id, current_premium, record,
+                                   self._fvg_frame(df_1m, df_5m), direction)
+        trail_stop = self._update_trail(
+            trade_id, current_premium, entry_prem, trail_act, stop_prem)
         trail_stop = self._trail_stops.get(trade_id, trail_stop)
         if trail_stop is not None:
             if current_premium <= trail_stop:

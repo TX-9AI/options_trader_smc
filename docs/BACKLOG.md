@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.8
+# docs/BACKLOG.md — options_trader_smc — v1.9
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -275,6 +275,34 @@ the default. The test proves placement, not usefulness.
 ⚠️ **DECISION OWED ON SWEEP:** it can now fire again, and its measured live
 win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
 
+**F.17 — [FLEET] ✅ FIXED 2026-08-19 (exit_engine v4.23) — THE ICT STOP WAS
+CARRIED AND NEVER READ.** Every ICT strategy fell through the exit router's
+`else` into `_evaluate_sweep`, which contains **no reference to
+`underlying_stop` in its 94 lines**. So a setup computed its structural stop
+(SweepMSS: the raid's wick extreme), `setup_base` validated the level's
+coherence, `entry_engine` wrote it to the record — and the trade was then
+managed on the 40% premium floor plus a generic BOS check while the thesis
+invalidation sat unread. Price could close back through the purged level with
+the position still open. It would have presented as "the ICT setups lose",
+not as a wiring gap. **Third instance of the same class** (sweep gate, flat
+angle, this): carried correctly right up to the consumer, invisible to every
+test.
+`_evaluate_ict` evaluates STRUCTURE FIRST — close-based on the last CLOSED 1m
+bar, so a wick through the swept level survives (a wick is a raid, a close is
+acceptance; an ICT setup stopped out by its own liquidity sweep would be a
+parody of itself) — keeps the premium floor underneath as a backstop, treats
+reaching the opposing draw as runner mode rather than a hard TP, and inherits
+hard-close, theta-bleed and the FVG trail unchanged. **Routed by PREFIX** so a
+setup added later cannot inherit the wrong evaluator by being forgotten in an
+enumeration. Legacy routing untouched — SweepReversal still lands in
+`_evaluate_sweep`, which matters because it is the comparison baseline.
+`tests/test_ict_exit.py` v1.0 calls the evaluator and asserts on the decision:
+routing (incl. all seven names and that SweepReversal did not move), the stop
+firing in BOTH directions while premium is healthy, the wick surviving, the
+floor still backstopping, and an inert stop being visible rather than silently
+green. **Proven to go red against the pre-v4.23 router (7 failures)** and
+carries a deliberate-failure mode.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -288,6 +316,9 @@ win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.9 — 2026-08-19** — F.17: exit_engine v4.23 adds `_evaluate_ict` so the
+  suite's own invalidation is finally read; tests/test_ict_exit.py pins it and
+  fails against the old router.
 - **v1.8 — 2026-08-19** — F.16: tests/ict_observe.py v1.0 built (six
   pre-registered criteria, separation direction pinned in code). Found the
   sentinel-forming defect on its first run.
