@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.9
+# docs/BACKLOG.md — options_trader_smc — v1.10
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -303,6 +303,30 @@ floor still backstopping, and an inert stop being visible rather than silently
 green. **Proven to go red against the pre-v4.23 router (7 failures)** and
 carries a deliberate-failure mode.
 
+**F.18 — [FLEET] ✅ DONE 2026-08-19 — TIGHTER FLOOR + ORB OUT OF RANGING.
+SHIPPED TO BOTH REPOS THE SAME DAY.** Operator direction. (1) `MAX_LOSS_PCT`
+0.40 → **0.25**, reaching `stop_hit` (sweep AND the ICT suite), `hard_stop`
+(ORB) and the ADOPTED stops via ADOPTED_STOP_PCT. Butterfly (own 0.25), condor
+(CONDOR_STOP_LOSS_PCT) and continuation (0.15) never read the constant and are
+untouched. The v2.0 argument for the wider floor assumed the structure stop was
+doing the real work underneath — it now genuinely is for ORB, Continuation,
+TC.6 and, since v4.23, the ICT suite, so the premium floor returns to being a
+disaster backstop rather than a second stop. (2) **ORB no longer fires under
+RANGING** — the operator's conclusive loss leader — as a FLAG
+(`ORB_BLOCK_RANGING`, env-reversible) rather than a deletion from
+`_orb_ok_regimes`, with the refusal journaled as `gate_block:orb_ranging`.
+Silence would have made "ORB did not set up" and "ORB was forbidden"
+indistinguishable in the record.
+⚠️ **The identical change ships to options_trader_v3** (main v6.19 / config
+v4.19 / BACKLOG v5.12). The fork and the legacy fleet are an A/B; moving a stop
+or a regime permission on one arm only would make every later difference
+between them unattributable.
+`tests/test_stops_and_orb_ranging.py` asserts the floor as a DECISION (−30%
+exits, −20% holds) rather than as a constant — asserting the constant alone
+would pass even if nothing read it — and pins the RANGING branch AHEAD of the
+permissive clause by AST, since a block placed after it would be dead code
+that still reads correctly. Deliberate-failure mode included.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -316,6 +340,8 @@ carries a deliberate-failure mode.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.10 — 2026-08-19** — F.18: MAX_LOSS_PCT 0.25 and ORB blocked in RANGING,
+  both mirrored to options_trader_v3 the same day for A/B integrity.
 - **v1.9 — 2026-08-19** — F.17: exit_engine v4.23 adds `_evaluate_ict` so the
   suite's own invalidation is finally read; tests/test_ict_exit.py pins it and
   fails against the old router.

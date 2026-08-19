@@ -1,5 +1,15 @@
 """
-main.py — options_trader_smc v6.22
+main.py — options_trader_smc v6.23
+v6.23  2026-08-19  ORB IS BLOCKED UNDER RANGING (operator direction: that
+       cell is the conclusive loss leader). The refusal is JOURNALED as
+       `gate_block:orb_ranging` rather than being a silent absence — without
+       that row, "ORB did not set up" and "ORB was forbidden" are
+       indistinguishable in the record, and only one of them is a decision we
+       can audit or reverse. Implemented as a leading branch with the existing
+       ladder moved to `elif`, so RANGING is refused BEFORE the permissive
+       ORB_FIRES_REGARDLESS_OF_REGIME clause can readmit it. Flag:
+       OT_ORB_BLOCK_RANGING=0 restores the old behaviour. Ships to
+       options_trader_v3 too — one arm changing is not a comparison.
 v6.22  2026-08-19  G6 — ICT PRE-LADDER DISPATCH WIRED. The seven ICT setups
        (strategy/ict, F.13) now evaluate on EVERY tick, ahead of the
        label-keyed priority ladder, because that ladder gates each branch on
@@ -738,6 +748,7 @@ from config import (
     CONT_BLOCK_PREMIUM_REGIMES,                 # CNT.6
     REGIME_REASSESS_MINUTES, INSTRUMENT, SessionConfig, DIRECTIONAL_ONLY,
     ORB_NO_ENTRY_AFTER_ET, BROKER_RECONCILE_ENABLED, ORB_FIRES_REGARDLESS_OF_REGIME,
+    ORB_BLOCK_RANGING,
     DEBIT_DIRECTIONAL_CUTOFF_ET, DEBIT_DIRECTIONAL_STRATEGIES, DEBIT_BLOCK_ACTIVE,
     CONDOR_PF_TIMEFRAME,                        # PF.5
     RTH_OPEN_ET, ORB_WINDOW_MINUTES,            # TC.6 v2.1 — range from tape
@@ -2444,7 +2455,25 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
         Regime.TRENDING_BULL, Regime.TRENDING_BEAR,
         Regime.BREAKOUT_VOLATILE, Regime.RANGING, Regime.COMPRESSION
     )
-    if signal is None and orb_confirmed and not _afd_orb and (
+    # v6.23 (2026-08-19) — ORB IS BLOCKED UNDER RANGING (operator: that cell is
+    # the conclusive loss leader). Journaled as a REFUSAL, not silence: without
+    # this row "ORB did not fire" and "ORB was forbidden to fire" look identical
+    # in the record, and the second is a decision we need to be able to audit
+    # and reverse. OT_ORB_BLOCK_RANGING=0 restores the old behaviour.
+    if (ORB_BLOCK_RANGING and signal is None and orb_confirmed and not _afd_orb
+            and regime.primary_regime == Regime.RANGING):
+        logger.info("ORB: BLOCKED — confirmed break+retest under RANGING, "
+                    "which is a blocked cell by operator direction")
+        if _sigj is not None:
+            try:
+                _sigj.journal("disposition",
+                              outcome="gate_block:orb_ranging",
+                              signal={"strategy": "ORBStrategy",
+                                      "stage": "regime_gate"},
+                              regime=_sigj.regime_ctx(regime, _l1_scores(ctx)))
+            except Exception:                                  # noqa: BLE001
+                pass
+    elif signal is None and orb_confirmed and not _afd_orb and (
             regime.primary_regime in _orb_ok_regimes
             or (ORB_FIRES_REGARDLESS_OF_REGIME and
                 regime.primary_regime in (Regime.UNKNOWN, Regime.SWEEP_REVERSAL))):

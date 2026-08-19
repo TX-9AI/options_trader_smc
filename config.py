@@ -1,5 +1,16 @@
 """
-config.py — options_trader_smc v4.20 (fork of options_trader v4.18)
+config.py — options_trader_smc v4.21 (fork of options_trader v4.18)
+v4.21 — 2026-08-19 — (1) MAX_LOSS_PCT 0.40 -> 0.25 by operator direction —
+        tightens `stop_hit` (sweep + ICT), `hard_stop` (ORB) and the ADOPTED
+        stops, which inherit it via ADOPTED_STOP_PCT. Butterfly (0.25 already),
+        condor (CONDOR_STOP_LOSS_PCT) and continuation (0.15) are unaffected —
+        they never read this constant. The identical change ships to
+        options_trader_v3 so the comparison stays apples-to-apples.
+        (2) ORB_BLOCK_RANGING — ORB no longer fires under RANGING. The operator
+        calls that cell the conclusive loss leader. Implemented as its own
+        env-tunable flag rather than by deleting RANGING from the tuple, so the
+        decision is visible, reversible and journaled rather than buried in a
+        literal.
 v4.20 — 2026-08-19 — G8: ICT SUITE REGISTRATIONS. (1) The seven ICT setups
         added to DEBIT_DIRECTIONAL_STRATEGIES by name — §3.1: a directional
         debit strategy that is not in this set silently bypasses the cutoff.
@@ -491,7 +502,19 @@ DAILY_LOSS_LIMIT_USD = float(os.environ.get("OT_DAILY_LOSS_LIMIT", str(RISK_PER_
 # ~$250) — set OT_DAILY_LOSS_LIMIT with that in mind. Butterflies keep their
 # own 25% (their 20%-of-max TP can't carry a 40% stop); condors keep
 # CONDOR_STOP_LOSS_PCT. Env-tunable for A/B: OT_MAX_LOSS_PCT=0.25 restores.
-MAX_LOSS_PCT        = float(os.environ.get("OT_MAX_LOSS_PCT", "0.40"))
+# v4.21 (2026-08-19) — TIGHTENED 0.40 -> 0.25 BY OPERATOR DIRECTION, and the
+# SAME CHANGE SHIPS TO THE LEGACY FLEET so the SMC box and its peers are still
+# an apples-to-apples comparison. Changing the floor on one arm only would
+# have made every subsequent P&L difference unattributable.
+# ⚠️ This supersedes the v2.0 reasoning below, which is left intact because it
+# is the argument this change overrules, not a mistake: v2.0 widened the floor
+# on the grounds that 0DTE gamma wicks a healthy trade -25% while the
+# impulsive origin is intact. That reasoning assumed the STRUCTURE STOP was
+# doing the real work underneath. It now genuinely is for ORB, Continuation,
+# TC.6 and — as of exit_engine v4.23 — the ICT suite, so the premium floor can
+# go back to being a disaster backstop rather than a second stop.
+# One floored $1000 position now costs ~$250 (was ~$400).
+MAX_LOSS_PCT        = float(os.environ.get("OT_MAX_LOSS_PCT", "0.25"))
 BUTTERFLY_STOP_LOSS_PCT = 0.25   # pin plays keep the tight floor (see above)
 # Max-loss stop applied to an ADOPTED position (one discovered open at the
 # broker on a LIVE restart with no DB plan). Defaults to the same threshold
@@ -606,6 +629,14 @@ FED_DAY_ORB_BOOST           = 0.20
 # no longer defers its OPEN to the sweep). Set False to restore strict v2 gating
 # (UNKNOWN/sweep block ORB). Every ORB that fires under UNKNOWN is logged with
 # regime=UNKNOWN — labeled tape for the shadow observer.
+# v4.21 (2026-08-19) — ORB IS BLOCKED UNDER RANGING. The operator's call:
+# that cell is the conclusive loss leader. A flag rather than a deletion from
+# _orb_ok_regimes, for three reasons — the decision stays READABLE, it is
+# reversible with an env var if the measurement says otherwise, and the
+# refusal can be JOURNALED so "ORB did not fire" is distinguishable from "ORB
+# was not allowed to". A silent deletion would have produced the second while
+# looking like the first.
+ORB_BLOCK_RANGING   = os.environ.get("OT_ORB_BLOCK_RANGING", "1") == "1"
 ORB_FIRES_REGARDLESS_OF_REGIME = True
 # When snapping an ORB strike target to the nearest available strike, break
 # toward the "higher" (more ITM / participation) or "lower" (further OTM) delta.
