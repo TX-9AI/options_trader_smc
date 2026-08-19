@@ -1,6 +1,33 @@
 #!/usr/bin/env python3
 """
-tests/ict_observe.py — the OBSERVE RUN. v1.0
+tests/ict_observe.py — the OBSERVE RUN. v1.1
+v1.1 — 2026-08-19 — THREE FIXES AND A NEW SECTION, after the first real run.
+       Two of the alarming numbers in that run were THIS FILE'S BUGS:
+       (1) "raided pool identifiable on 0/1065 READY rows" — I read
+           `raid["level"]`. `raid_in_progress()` returns `pool`, `kind`,
+           `name`, `depth_pct`. There is no `level` key and never was, so the
+           lookup returned None on every row and the harness reported a data
+           problem that did not exist. Worse, the RISK DENOMINATOR fell back to
+           the displacement origin, so section 5's R units were not the setup's
+           own invalidation — which is what section 5 claims to measure.
+       (2) "INVERTED — the scorer is confirming spent moves" was printed for
+           low −0.00R vs high −0.00R. A strictly-less-than test on two
+           effectively-equal medians. FLAT and INVERTED are different findings
+           with different responses, and calling a tie an inversion is the
+           cry-wolf pattern in the one section that decides everything. There
+           is now a tolerance band, the raw delta is printed, and a quartile
+           profile is shown so a monotone relationship is visible rather than
+           inferred from two numbers.
+       (3) Sentinel rows are counted per BAR and the zone mix is reported for
+           READY rows specifically, so "formed with no dealing range" is
+           quantified rather than implied.
+       NEW SECTION 7 — COMPONENT DIAGNOSTICS. The first run said six of seven
+       setups never reached READY and gave no way to ask why. Section 7 reports,
+       per setup and per component: how often it was AVAILABLE, its mean value
+       when available, and how often it MET ITS FLOOR — then names the required
+       component that blocked most often. "SweepMSS never fired" is not
+       actionable; "SweepMSS stalled on dir:sweep in 97% of ticks because the
+       raid primitive is rarely available" is.
 v1.0 — 2026-08-19 — INITIAL.
 
 Nothing here decides anything. It replays the ICT suite over real tape and
@@ -146,6 +173,8 @@ def main():
     smc = SMCEngine(state_dir=None)
 
     rows = []                      # one per (bar, setup) with a live score
+    comp = defaultdict(lambda: {"n": 0, "avail": 0, "met": 0, "sum": 0.0,
+                                "req": False, "floor": 0.0, "why": {}})
     prev_phase = {}
     transitions = defaultdict(list)
     violations = []
@@ -184,6 +213,22 @@ def main():
                 continue
 
             for sc in scores:
+                # ── v1.1 §7 — WHY did this setup not advance? Per component:
+                # availability, value when available, and whether it met its
+                # floor. Without this, "six of seven never reached READY" is a
+                # dead end; with it, the blocking component is named.
+                for c in sc.components:
+                    st_ = comp[(sc.setup, c.name)]
+                    st_["n"] += 1
+                    st_["req"] = bool(getattr(c, "required", False))
+                    st_["floor"] = float(getattr(c, "floor", 0.0) or 0.0)
+                    if getattr(c, "available", True):
+                        st_["avail"] += 1
+                        st_["sum"] += float(c.value)
+                        if float(c.value) >= st_["floor"]:
+                            st_["met"] += 1
+                    elif getattr(c, "reason", ""):
+                        st_["why"][c.reason] = st_["why"].get(c.reason, 0) + 1
                 ph = sc.phase()
                 key = sc.setup
                 if prev_phase.get(key) != ph:
@@ -205,12 +250,22 @@ def main():
                     violations.append(
                         f"{t} {key}: sweep/shift direction disagree "
                         f"({ictx.displacement_dir} vs {ictx.last_shift_dir})")
+                # v1.1 — the key is `pool`, not `level`. Getting this wrong
+                # silently moved section 5's R denominator off the setup's own
+                # invalidation and onto the displacement origin.
                 risk = None
+                pool = None
                 if ictx.raid and isinstance(ictx.raid, dict):
-                    lvl = ictx.raid.get("level")
-                    if lvl:
-                        risk = abs(price - float(lvl))
-                if risk in (None, 0):
+                    pool = ictx.raid.get("pool")
+                    if pool:
+                        risk = abs(price - float(pool))
+                if not risk:
+                    sw = ictx.recent_sweep or {}
+                    _sp = sw.get("sweep_price") or sw.get("price")
+                    if _sp:
+                        pool = pool or _sp
+                        risk = abs(price - float(_sp))
+                if not risk and ictx.displacement_origin:
                     risk = abs(price - ictx.displacement_origin) or None
                 rows.append({
                     "t": t, "setup": key, "phase": ph, "score": s,
@@ -218,7 +273,8 @@ def main():
                     "direction": sc.direction,
                     "pos": ictx.position_pct, "zone": ictx.zone,
                     "raid": bool(ictx.raid),
-                    "pool": (ictx.raid or {}).get("level") if ictx.raid else None,
+                    "pool": pool,
+                    "pool_name": (ictx.raid or {}).get("name") if ictx.raid else None,
                     "fwd_r": forward_r(df, i_global, sc.direction, risk),
                     "hour": t.hour + t.minute / 60.0,
                     "day": str(d),
@@ -262,6 +318,11 @@ def main():
             print(f"     … {len(violations)-8} more")
     else:
         print("  ✅ no sentinel-forms, no direction disagreements, no raises")
+    nozone = sum(1 for r in ready if r["pos"] == -1.0)
+    print(f"  READY rows with NO dealing range (-1.0 sentinel): "
+          f"{nozone}/{len(ready)}"
+          + ("   🔴 a POI setup with no range is a claim about nothing"
+             if nozone else ""))
     print(f"  raided pool identifiable on {named}/{len(ready)} READY rows"
           + ("   ⚠️ the row cannot say WHAT was raided" if ready and named < len(ready) else ""))
 
@@ -308,11 +369,27 @@ def main():
         lo = [r["fwd_r"] for r in scored[:half]]
         hi = [r["fwd_r"] for r in scored[-half:]]
         mlo, mhi = stats.median(lo), stats.median(hi)
-        verdict = ("SEPARATES" if mhi > mlo else
+        # v1.1 — a TOLERANCE, because FLAT and INVERTED demand different
+        # responses and a strictly-less-than test on two equal medians called
+        # a tie an inversion. Flat means the score carries no information;
+        # inverted means it carries information the wrong way round, which is
+        # the grade-inversion signature and a far more serious finding.
+        eps = 0.05
+        delta = mhi - mlo
+        verdict = ("SEPARATES" if delta > eps else
                    "INVERTED — the scorer is confirming spent moves"
-                   if mhi < mlo else "FLAT")
-        print(f"  n={len(scored)}  low-half median {mlo:+.2f}R  "
-              f"high-half median {mhi:+.2f}R  →  {verdict}")
+                   if delta < -eps else
+                   "FLAT — the score carries no forward information "
+                   "(not an inversion; a nullity)")
+        print(f"  n={len(scored)}  low-half median {mlo:+.3f}R  "
+              f"high-half median {mhi:+.3f}R  delta {delta:+.3f}R  "
+              f"(tolerance ±{eps})  →  {verdict}")
+        # quartile profile: a monotone climb is the thing SEPARATES claims
+        qs = [scored[i * len(scored) // 4:(i + 1) * len(scored) // 4]
+              for i in range(4)]
+        prof = "  ".join(f"Q{i+1} {stats.median([r['fwd_r'] for r in q]):+.3f}"
+                         for i, q in enumerate(qs) if q)
+        print(f"  by score quartile (low→high): {prof}")
         print(f"  (forward window {args.forward} bars, UNDERLYING R on the "
               f"setup's own invalidation — no premium, no fills)")
 
@@ -325,6 +402,33 @@ def main():
     zones = Counter(r["zone"] for r in ready)
     print("  entry zone mix: " + (", ".join(f"{k}={v}" for k, v in zones.most_common())
                                   or "(none)"))
+
+    # ── 7. COMPONENT DIAGNOSTICS — the "why" behind section 1 ───────────
+    print("\n-- 7. COMPONENT DIAGNOSTICS (why a setup did or did not advance)")
+    setups = sorted({k[0] for k in comp})
+    for name in setups:
+        items = [(k[1], v) for k, v in comp.items() if k[0] == name]
+        items.sort(key=lambda kv: (not kv[1]["req"], kv[0]))
+        n_tot = max((v["n"] for _k, v in items), default=0)
+        print(f"\n  {name}  ({n_tot} evaluations)")
+        blockers = []
+        for cname, v in items:
+            av = 100.0 * v["avail"] / max(1, v["n"])
+            mean = v["sum"] / max(1, v["avail"])
+            met = 100.0 * v["met"] / max(1, v["n"])
+            tag = "REQUIRED" if v["req"] else "        "
+            print(f"    {tag} {cname:<20} avail {av:5.1f}%  "
+                  f"mean {mean:4.2f}  meets floor({v['floor']:.2f}) {met:5.1f}%")
+            if v["why"]:
+                top = sorted(v["why"].items(), key=lambda x: -x[1])[0]
+                print(f"             unavailable because: {top[0]} "
+                      f"({100.0*top[1]/max(1,v['n']):.0f}% of ticks)")
+            if v["req"]:
+                blockers.append((met, cname))
+        if blockers:
+            blockers.sort()
+            print(f"    → STALLED ON: {blockers[0][1]} "
+                  f"(met its floor on only {blockers[0][0]:.1f}% of ticks)")
 
     print("\n" + "=" * 70)
     print("NOTHING WAS DECIDED HERE. Supply the numbers from these "

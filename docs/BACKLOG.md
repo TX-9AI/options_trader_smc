@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.10
+# docs/BACKLOG.md — options_trader_smc — v1.11
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -327,6 +327,48 @@ would pass even if nothing read it — and pins the RANGING branch AHEAD of the
 permissive clause by AST, since a block placed after it would be dead code
 that still reads correctly. Deliberate-failure mode included.
 
+**F.19 — [DESK] 🔴 THE SWEEP EVIDENCE WAS DEAD ON BOTH BRANCHES. ✅ FIXED
+2026-08-19.** The first real observe run said six of seven setups never
+reached READY across 27 sessions, and the only one that ever fired was
+**ICTOBFVG — the lowest-ranked of the seven, the one needing no sweep and no
+kill-zone at all.** That looked like a model result. It was a key mismatch, in
+two places:
+1. `sweep_evidence()` reads `raid["thesis"]`; `raid_in_progress()` emitted
+   `pool`/`kind`/`name`/`depth_pct` and nothing about direction. **primitives
+   v1.1** now states the thesis a raid implies (a swept LOW that reclaimed took
+   sell-side liquidity and failed → thesis UP; mirrored for highs).
+2. The context adapter reads `LiquiditySweep.direction`; the dataclass had
+   `kind` and no such attribute, so `getattr(s, "direction", "")` won every
+   time. **liquidity_mapper v4.2** adds it as a DERIVED property — the
+   consumer was already asking, the producer simply never offered.
+Measured effect on the smoke tape: ICTSweepMSS's required `dir:sweep` went
+from **mean 0.00 / meets-floor 0.0%** to **mean 0.40 / 57.2%**. Additive on
+both sides; no consumer of `kind` changes.
+⚠️ Neither raised. Neither failed a test. A required component was simply
+always zero — and it presented as "the setups don't work".
+
+**F.20 — [DESK] ✅ `tests/test_key_contracts.py` v1.0 — the generalizable guard.**
+THREE instances of this exact shape inside twelve hours: the two above, plus
+the observe harness reading `raid["level"]`, which reported "pool identifiable
+on 0/1065 rows" as a data problem AND silently moved the separation study's R
+denominator off the setup's own invalidation. The test asserts every key or
+attribute a consumer reads exists in what the producer ACTUALLY RETURNS —
+checked against a real produced object, never a fixture, because a fixture
+just re-encodes the assumption that was wrong. Then it asserts the DECISION,
+since a key can exist and still not be consulted.
+
+**F.21 — [DESK] ✅ `tests/ict_observe.py` v1.1.** Three fixes and a new
+section. The raid-key bug above; the separation verdict printing **INVERTED**
+for low −0.00R vs high −0.00R (a strictly-less-than test on two equal medians
+— FLAT and INVERTED demand different responses, and calling a tie an inversion
+is cry-wolf in the one section that decides everything), now a tolerance band
+with the raw delta and a quartile profile; and READY-row zone reporting so
+"formed with no dealing range" is quantified. **NEW §7 COMPONENT
+DIAGNOSTICS** — per setup and component: availability, mean when available,
+how often it met its floor, and the required component that blocked most
+often. "SweepMSS never fired" is not actionable; "SweepMSS stalled on
+dir:sweep, mean 0.00" is — and that is how F.19 was found.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -340,6 +382,9 @@ that still reads correctly. Deliberate-failure mode included.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.11 — 2026-08-19** — F.19 sweep evidence revived (primitives v1.1 +
+  liquidity_mapper v4.2), F.20 key-contract test, F.21 observe v1.1 with
+  component diagnostics.
 - **v1.10 — 2026-08-19** — F.18: MAX_LOSS_PCT 0.25 and ORB blocked in RANGING,
   both mirrored to options_trader_v3 the same day for A/B integrity.
 - **v1.9 — 2026-08-19** — F.17: exit_engine v4.23 adds `_evaluate_ict` so the

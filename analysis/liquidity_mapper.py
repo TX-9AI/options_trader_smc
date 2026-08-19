@@ -1,5 +1,13 @@
 """
-analysis/liquidity_mapper.py — v4.1 — 2026-08-15 — AUDIT A2: THE INPUT COULD NOT
+analysis/liquidity_mapper.py — v4.2 — 2026-08-19 — LiquiditySweep.direction.
+        A derived property (never stored) giving the THESIS a sweep implies:
+        a swept LOW that reclaimed took sell-side liquidity and failed, so the
+        thesis is UP; mirrored for highs. The ICT context adapter was already
+        asking `getattr(s, "direction", "")` and this dataclass never had the
+        attribute, so the default won on every tick and the suite's
+        confirmed-sweep evidence was 0.00 across 27 sessions. Additive: no
+        existing consumer of `kind` changes.
+v4.1 — 2026-08-15 — AUDIT A2: THE INPUT COULD NOT
         CARRY LIQ.6, AND FOUR SMALLER DEFECTS.
 v4.1 — 2026-08-15 — audit #2 fixes:
         (A2.1) SECTION_LOOKBACK_DAYS=10 read df_5m, which the cache caps at
@@ -201,6 +209,24 @@ class LiquiditySweep:
     swept_named_level: str  = ""        # Name of the level swept, if any
     # v1.3 — rejection vs acceptance (the truth that makes it a sweep, not a breakout)
     reclaimed:      bool    = False     # price closed back INSIDE the level and held
+
+    @property
+    def direction(self) -> str:
+        """v1.4 (2026-08-19) — THE THESIS THIS SWEEP IMPLIES.
+
+        Consumers were already asking for `.direction` — the ICT context
+        adapter does `getattr(s, "direction", "")` — and this dataclass never
+        had it, so the getattr default won every time and the ICT suite's
+        confirmed-sweep evidence scored 0.00 on every tick ever evaluated.
+        The producer simply never offered what the consumer was asking for.
+        Derived, never stored: a swept LOW that reclaimed took sell-side
+        liquidity and failed, so the thesis is UP; mirrored for highs.
+        """
+        if self.kind == "low_sweep":
+            return "bullish"
+        if self.kind == "high_sweep":
+            return "bearish"
+        return ""
     closes_beyond:  int     = 0         # # of closes that ACCEPTED through the level
     # ⚠️ LIQ.3 (2026-08-11) — `closes_beyond` above is a BIRTH-TIME snapshot,
     # counted over the 2-3 bars right after the raid and NEVER UPDATED. It

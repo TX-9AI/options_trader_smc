@@ -1,5 +1,13 @@
 """
-smc/primitives.py — SMC/ICT structural primitives (pure functions). v1.0
+smc/primitives.py — SMC/ICT structural primitives (pure functions). v1.1
+v1.1 — 2026-08-19 — `raid_in_progress()` now states the THESIS it implies.
+        It emitted `kind` ("high_raid"/"low_raid") and nothing else about
+        direction, while every consumer asked for `thesis`/`direction`. The
+        result was silent and total: `sweep_evidence()` scored 0.00 on every
+        tick of 27 sessions, so ICTSweepMSS, ICTModel2022 and ICTJudasPO3
+        could never reach READY and the only setup that ever fired was the
+        one that needs no sweep at all — the lowest-ranked of the seven.
+        Nothing raised; a required component was simply always zero.
 v1.0 — 2026-08-18 — INITIAL (fork: options_trader_smc, candidate QQQ).
         Pure functions only — no state, no I/O, no side effects. Every
         function is a function of the frames/state objects passed in, in
@@ -283,12 +291,21 @@ def raid_in_progress(df_1m: pd.DataFrame, pools, price: float
             depth = (hi - p.price) / p.price
             if depth >= SWEEP_WICK_MIN_PCT:
                 return {"pool": p.price, "kind": "high_raid",
+                        # v1.1 — THE THESIS THE RAID IMPLIES, stated outright.
+                        # Consumers were asking `raid["thesis"]` and getting
+                        # nothing, because this dict only ever carried `kind`.
+                        # A raid THROUGH a high that closes back inside took
+                        # buy-side liquidity and failed, so the thesis is DOWN.
+                        "thesis": "bearish", "direction": "bearish",
                         "name": getattr(p, "name", "") or "eqh",
                         "depth_pct": round(depth, 6)}
         if 0 < p.price and lo < p.price and close > p.price:
             depth = (p.price - lo) / p.price
             if depth >= SWEEP_WICK_MIN_PCT:
                 return {"pool": p.price, "kind": "low_raid",
+                        # a swept LOW that reclaimed took sell-side liquidity
+                        # and failed -> the thesis is UP.
+                        "thesis": "bullish", "direction": "bullish",
                         "name": getattr(p, "name", "") or "eql",
                         "depth_pct": round(depth, 6)}
     return None
