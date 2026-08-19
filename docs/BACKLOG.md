@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.7
+# docs/BACKLOG.md — options_trader_smc — v1.8
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -223,6 +223,30 @@ surface; (2) its harness run (`--engine smc`, real QQQ tape); (3) arming it in
 the unit file, and only then; (4) G1–G5 unblock SB / 2022 / Breaker / OTE /
 Judas respectively.
 
+**F.16 — [DESK] THE OBSERVE RUN. Harness ✅ BUILT 2026-08-19
+(`tests/ict_observe.py` v1.0); the RUN on real QQQ tape is owed.**
+Replays the ICT suite bar-by-bar over the per-date OHLC tape and reports the
+six pre-registered criteria — frequency · chain integrity · score
+distribution · stability · **separation** · novelty. It DECIDES NOTHING: the
+numbers come out of the observed distribution, and the thresholds chosen from
+them must be tested on a DIFFERENT pass, never the one that produced them.
+**Separation's direction is pre-registered IN CODE:** the high-score half's
+median forward R must EXCEED the low-score half's; inverted is the
+grade-inversion signature and a stop-and-rethink, not a retune.
+Forward outcome is TERMINAL move over 30 bars in underlying R on each setup's
+own invalidation — deliberately not maximum-favourable excursion, which is
+positive for nearly any bar and would manufacture a separation that is not
+there. No premium, no fills, no theta: occurrence only.
+⚠️ **Smoke-tested on synthetic tape only so far.** That run's separation
+figure is meaningless (a random walk cannot separate) — it proved the plumbing,
+not the model.
+🔴 **AND IT ALREADY FOUND THE FIRST REAL DEFECT:** setups form while
+`position_pct == -1.0`, the no-range sentinel. A POI setup is a claim about
+where price sits in a range; with no range the claim is empty. 1122 bars of
+the smoke tape tripped it. This is now a pre-registered CHAIN-INTEGRITY
+violation — a defect in our code, not a signal about the setup — and it is the
+core's to fix before any observed number is trusted.
+
 ## PART 2 — DEFERRED, WITH THE GATE NAMED
 - **Sizing on structural confidence** — gated on the parent transition
   roadmap's five Phase-2 preconditions. Not before.
@@ -264,6 +288,9 @@ win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.8 — 2026-08-19** — F.16: tests/ict_observe.py v1.0 built (six
+  pre-registered criteria, separation direction pinned in code). Found the
+  sentinel-forming defect on its first run.
 - **v1.7 — 2026-08-19** — F.15: G6 (main v6.22 pre-ladder ICT dispatch) and G8
   (config v4.20 registrations + 11:30 cutoff) BUILT, with
   tests/test_ict_wiring.py. The suite is now reachable; nothing is armed.
