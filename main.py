@@ -1,5 +1,22 @@
 """
-main.py — options_trader_smc v6.21
+main.py — options_trader_smc v6.22
+v6.22  2026-08-19  G6 — ICT PRE-LADDER DISPATCH WIRED. The seven ICT setups
+       (strategy/ict, F.13) now evaluate on EVERY tick, ahead of the
+       label-keyed priority ladder, because that ladder gates each branch on
+       primary_regime and would discard a Silver Bullet for carrying a
+       COMPRESSION label. This branch consults no label (operator 2026-08-18:
+       a label may be used by a setup that earns something from it, never as
+       a silent precondition). A returned None falls through and the ladder
+       is byte-identical to v6.21. Runs even when nothing can fire, on
+       purpose: the suite journals FORMING states continuously and that
+       journal is the only source the priors are ever fitted from. SB/ORB
+       share the slot with ICT ranked first and every preemption journaled as
+       `preempted:ict_ranked_first`, so the counterfactual stays measurable.
+       SAFETY: three gates inside the suite default CLOSED (OT_ICT_ARMED,
+       per-setup OT_ICT_<NAME>_VALIDATED, the 11:30 debit cutoff), so this
+       can only return None until a validated setup is armed. Import is
+       guarded and pages loudly — an unavailable suite must not look like a
+       quiet session.
 v6.21  2026-08-18  🔴 LAYER-1 HOISTED OUT OF THE L2 BRANCH — two regressions
        the SMC wiring introduced silently, neither about the label.
        (1) SweepReversal COULD NOT FIRE under the smc engine: its dispatch
@@ -835,6 +852,19 @@ if _SMC_OK and _REGIME_ENGINE == "smc":
     _smc_engine = SMCEngine(state_dir=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "data"))
 _smc_last_setup_phase = None    # journal setup transitions once per change
+
+# ── G6 (v6.22) — the ICT setup suite (strategy/ict, F.13) ────────────────────
+# Guarded like the SMC import: an unavailable suite must not take the bot down,
+# but it must SAY SO once rather than degrade into "no setup ever formed",
+# which is a legitimate reading and would hide the outage.
+try:
+    from strategy.ict import build_context as build_ict_context, ict_dispatch
+    _ICT_OK = True
+except Exception as _icte:                      # pragma: no cover
+    _ICT_OK = False
+    logger.error("ICT SUITE UNAVAILABLE (%s) — the seven ICT setups will not "
+                 "be evaluated this session; the label ladder is unaffected",
+                 _icte)
 
 _l2_mute     = {}          # v4.6 — last-reported reason L2 is not committing
 # v4.7 — state the active regime engine ONCE at import, at INFO. Until now the
@@ -2347,6 +2377,64 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
             except Exception:                                  # noqa: BLE001
                 pass
 
+    # ══ G6 (v6.22) — ICT PRE-LADDER DISPATCH ═══════════════════════════════
+    # The seven ICT setups run HERE, ahead of the label-keyed ladder below,
+    # because that ladder gates every branch on `primary_regime` and would
+    # discard a Silver Bullet for the crime of a COMPRESSION label. Operator,
+    # 2026-08-18: a regime label may be USED by a setup that earns something
+    # from it, but it may never be a silent precondition. This branch consults
+    # no label at all.
+    #
+    # ⚠️ RUNS EVERY TICK, ON PURPOSE, even when nothing can fire. The suite
+    # journals FORMING states continuously and that journal is the only data
+    # from which the priors ever get fitted. A "dispatch only when armed"
+    # shortcut would leave us with an empty journal and nothing to calibrate —
+    # the parent's exact mistake, which is why this fork exists.
+    #
+    # SAFETY: three independent gates inside the suite all default CLOSED
+    # (OT_ICT_ARMED, per-setup OT_ICT_<NAME>_VALIDATED, the 11:30 debit
+    # cutoff), so until the operator arms a validated setup this branch can
+    # only ever return None. `None` falls through to the ladder unchanged.
+    ict_sig = None
+    if _ICT_OK:
+        try:
+            ictx = build_ict_context(
+                smc_state=ctx.get("smc"), structure=ctx["structure"],
+                liq_map=ctx["liq_map"], df_1m=ctx.get("df_1m"),
+                now_et=now_et(), price=ctx["price"])
+            ict_sig = ict_dispatch(
+                ictx, chain=chain, now_et=now_et(),
+                journal=(_sigj.journal if _sigj is not None else None))
+        except Exception as _ie:                               # noqa: BLE001
+            # LOUD. A silent failure here reads exactly like "no setup formed",
+            # which is a legitimate outcome — so the two must never look alike.
+            logger.error("[ict] dispatch failed (%s) — no ICT evaluation this "
+                         "tick; the ladder below is unaffected", _ie)
+    if ict_sig is not None:
+        signal = ict_sig
+        # ── SB/ORB SHARE THE SLOT, and the counterfactual is recorded ───────
+        # Operator's §4.2 decision: ICT ranks first, ORB takes the ticks it
+        # does not want, and every preemption is journaled so "what did the
+        # ranking cost?" is answerable from data rather than opinion. Without
+        # this row, an ORB that never fired is indistinguishable from an ORB
+        # that never set up.
+        if orb_confirmed and not _afd_orb:
+            logger.info("[ict] %s preempted a CONFIRMED ORB this tick",
+                        signal.strategy_name)
+            if _sigj is not None:
+                try:
+                    _sigj.journal("disposition",
+                                  outcome="preempted:ict_ranked_first",
+                                  signal={"strategy": "ORBStrategy",
+                                          "stage": "pre_ladder",
+                                          "preempted_by": signal.strategy_name},
+                                  regime=_sigj.regime_ctx(regime,
+                                                          _l1_scores(ctx)))
+                except Exception:                              # noqa: BLE001
+                    pass
+        logger.info("[ict] %s takes the slot — the label ladder is skipped "
+                    "this tick", signal.strategy_name)
+
     # Priority 1: ORB — only when the engine has a CONFIRMED break+retest.
     # With ORB_FIRES_REGARDLESS_OF_REGIME on, a confirmed ORB also fires under
     # UNKNOWN and SWEEP_REVERSAL (ORB beats sweep — the engine no longer defers
@@ -2356,7 +2444,7 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
         Regime.TRENDING_BULL, Regime.TRENDING_BEAR,
         Regime.BREAKOUT_VOLATILE, Regime.RANGING, Regime.COMPRESSION
     )
-    if orb_confirmed and not _afd_orb and (
+    if signal is None and orb_confirmed and not _afd_orb and (
             regime.primary_regime in _orb_ok_regimes
             or (ORB_FIRES_REGARDLESS_OF_REGIME and
                 regime.primary_regime in (Regime.UNKNOWN, Regime.SWEEP_REVERSAL))):

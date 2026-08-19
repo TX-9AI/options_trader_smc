@@ -1,5 +1,14 @@
 """
-config.py — options_trader_smc v4.19 (fork of options_trader v4.18)
+config.py — options_trader_smc v4.20 (fork of options_trader v4.18)
+v4.20 — 2026-08-19 — G8: ICT SUITE REGISTRATIONS. (1) The seven ICT setups
+        added to DEBIT_DIRECTIONAL_STRATEGIES by name — §3.1: a directional
+        debit strategy that is not in this set silently bypasses the cutoff.
+        (2) DEBIT_DIRECTIONAL_CUTOFF_ET default 11:00 -> 11:30, because the
+        Silver Bullet window runs to 11:30 and the old value would have killed
+        its last half hour without saying so. (3) The OT_ICT_* knob block
+        documented at the end of this file — all stated priors, all three fire
+        gates default CLOSED. The GEX-pin butterfly stays exempt by ABSENCE
+        from the set, exactly as it already was.
 v4.19 — 2026-08-18 — SMC CORE KNOBS (fork: options_trader_smc). Documented
         defaults for the smc/ package; env always wins (the OT_RC_*/OT_TR_*
         convention — a bound correction is an env flip, not a bake):
@@ -557,9 +566,22 @@ ORB_NO_ENTRY_AFTER_ET       = (11, 0)   # ORB-SCOPED: ORB entries valid until 11
 # NOTHING fires. That window belongs to the trend credit spread (TC.6), which is
 # NOT BUILT. Until it is, a trending afternoon is dark ON PURPOSE — which is the
 # point: the measured cost of that window is negative.
+# G8 (v4.20) — DEFAULT MOVED 11:00 -> 11:30. The Silver Bullet window runs to
+# 11:30, so an 11:00 cutoff would have silently killed its last thirty minutes
+# (operator, 2026-08-18). Still env-overridable via OT_DEBIT_CUTOFF_ET, and the
+# GLOBAL 14:00 no-entry ceiling below still applies to EVERYTHING, credits
+# included.
 DEBIT_DIRECTIONAL_CUTOFF_ET = tuple(int(x) for x in
-                                    os.environ.get("OT_DEBIT_CUTOFF_ET", "11:00").split(":"))
-DEBIT_DIRECTIONAL_STRATEGIES = {"ORBStrategy", "ContinuationStrategy", "SweepReversal"}
+                                    os.environ.get("OT_DEBIT_CUTOFF_ET", "11:30").split(":"))
+# G8 (v4.20) — the seven ICT setups are all debit-directional in v1.0, so each
+# is registered BY NAME per handoff §3.1: a new directional debit strategy that
+# is not in this set silently bypasses the cutoff. The GEX-pin butterfly is
+# absent DELIBERATELY — absence is how it stays exempt, and it is separately
+# window-gated by BUTTERFLY_ENTRY_START_ET / BUTTERFLY_ENTRY_CUTOFF_ET.
+DEBIT_DIRECTIONAL_STRATEGIES = {"ORBStrategy", "ContinuationStrategy", "SweepReversal",
+                                "ICTSilverBullet", "ICTJudasPO3", "ICTModel2022",
+                                "ICTSweepMSS", "ICTBreakerUnicorn",
+                                "ICTOTEConfluence", "ICTOBFVG"}
 DEBIT_BLOCK_ACTIVE          = os.environ.get("OT_DEBIT_BLOCK_ACTIVE", "1") == "1"
 
 GLOBAL_NO_ENTRY_ET          = (14, 0)   # GLOBAL: no new 0DTE entries after 14:00 ET,
@@ -1307,3 +1329,34 @@ VELOCITY_MEASURED_STRATEGIES = ("ORBStrategy",)
 SMC_ACCEPT_CLOSES    = int(os.environ.get("OT_SMC_ACCEPT_CLOSES", "2"))
 SMC_POI_APPROACH_ATR = float(os.environ.get("OT_SMC_POI_APPROACH_ATR", "0.75"))
 SMC_REVOKE_GATES     = os.environ.get("OT_SMC_REVOKE_GATES", "1") == "1"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ICT SETUP SUITE (strategy/ict, F.13) — G8, v4.20, 2026-08-19
+# DOCUMENTED DEFAULTS ONLY. The suite reads OT_ICT_* from the environment at
+# import — the same contract as OT_SMC_* / OT_RC_* / OT_TR_*: env wins, config
+# is where a reader finds out what exists. Change via systemd env, not here.
+# EVERY VALUE IS A STATED PRIOR (operator's category 1), to be fitted from this
+# box's own `ict_setup` journal — never tuned on one bad session.
+# ⚠️ THE THREE FIRE GATES DEFAULT CLOSED AND STAY THAT WAY until a setup passes
+# a §3.5 harness run against a pass condition the OPERATOR wrote first.
+# ═════════════════════════════════════════════════════════════════════════════
+ICT_ARMED              = os.environ.get("OT_ICT_ARMED", "0") == "1"
+ICT_SCORE_FLOOR        = float(os.environ.get("OT_ICT_SCORE_FLOOR", "0.65"))
+ICT_COMPLETENESS_FLOOR = float(os.environ.get("OT_ICT_COMPLETENESS_FLOOR", "0.75"))
+ICT_SB_START           = os.environ.get("OT_ICT_SB_START", "09:45")  # Silver Bullet
+ICT_SB_END             = os.environ.get("OT_ICT_SB_END",   "11:30")  #   window, ET
+ICT_DEBIT_CUTOFF       = os.environ.get("OT_ICT_DEBIT_CUTOFF", "11:30")
+ICT_SIZE_BIAS_MIN      = float(os.environ.get("OT_ICT_SIZE_BIAS_MIN", "0.50"))
+ICT_SIZE_BIAS_STRONG   = float(os.environ.get("OT_ICT_SIZE_BIAS_STRONG", "0.75"))
+ICT_SIZE_BIAS_CLEAN    = float(os.environ.get("OT_ICT_SIZE_BIAS_CLEAN", "0.85"))
+ICT_SIZE_SD_AWARE      = float(os.environ.get("OT_ICT_SIZE_SD_AWARE", "1.75"))
+ICT_SIZE_SD_CONFIRM    = float(os.environ.get("OT_ICT_SIZE_SD_CONFIRM", "2.0"))
+ICT_SIZE_FRAC_MARGINAL = float(os.environ.get("OT_ICT_SIZE_FRAC_MARGINAL", "0.33"))
+ICT_SIZE_FRAC_SOLID    = float(os.environ.get("OT_ICT_SIZE_FRAC_SOLID", "0.66"))
+# Per-setup validation gates. Arming a setup = OT_ICT_<NAME>_VALIDATED=1 in the
+# unit file, AFTER its harness run, and never before.
+ICT_VALIDATED = {n: os.environ.get(f"OT_ICT_{n}_VALIDATED", "0") == "1"
+                 for n in ("ICTSILVERBULLET", "ICTJUDASPO3", "ICTMODEL2022",
+                           "ICTSWEEPMSS", "ICTBREAKERUNICORN",
+                           "ICTOTECONFLUENCE", "ICTOBFVG")}

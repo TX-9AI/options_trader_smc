@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.6
+# docs/BACKLOG.md — options_trader_smc — v1.7
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -195,6 +195,34 @@ the TCS/`credit_vertical.py` machinery (POP-gated, mark-or-better) rather
 than growing a second credit path — the TCS.1 lesson. Not built in v1.0;
 dispatch journals the demand so this is sized by data, not appetite.
 
+**F.15 — [FLEET] ✅ G6 + G8 BUILT 2026-08-19 — THE RAILS THE ICT SETUPS RUN ON.**
+Until this landed, `strategy/ict/` was unreachable code however green its
+tests were. **G6** (main **v6.22**): the ICT branch evaluates on EVERY tick
+inside `attempt_new_entry`, positioned BEFORE the label-keyed ladder — proven
+by AST line position, not by grep, because "before" is an order property.
+Returns None → the ladder runs byte-identically to v6.21. ORB now tests
+`signal is None` so it cannot overwrite an ICT signal one line later, and a
+preempted CONFIRMED ORB journals `preempted:ict_ranked_first` — the
+counterfactual the operator's share-the-slot decision depends on. Import
+guarded; an unavailable suite PAGES rather than looking like a quiet session.
+**G8** (config **v4.20**): all seven NAMEs registered in
+`DEBIT_DIRECTIONAL_STRATEGIES` (verified equal to the suite's own NAME
+constants — a name mismatch would exempt a debit setup from the cutoff
+silently), `DEBIT_DIRECTIONAL_CUTOFF_ET` 11:00 → **11:30** so the Silver
+Bullet window is not truncated, the GEX-pin butterfly still exempt BY ABSENCE,
+and the OT_ICT_* knob block documented as stated priors.
+`tests/test_ict_wiring.py` v1.0 pins all four properties with a
+deliberate-failure mode.
+⚠️ **NOTHING IS ARMED.** `OT_ICT_ARMED=0` and every per-setup
+`OT_ICT_<NAME>_VALIDATED=0`. The next session journals `ict_setup` forming
+states and trades no ICT setup — which is the intended first-light state, and
+the journal is the data the priors get fitted from.
+**Owed, in order:** (1) the operator writes the pass condition for
+**ICTSweepMSS** — the only setup whose required chain completes on today's
+surface; (2) its harness run (`--engine smc`, real QQQ tape); (3) arming it in
+the unit file, and only then; (4) G1–G5 unblock SB / 2022 / Breaker / OTE /
+Judas respectively.
+
 ## PART 2 — DEFERRED, WITH THE GATE NAMED
 - **Sizing on structural confidence** — gated on the parent transition
   roadmap's five Phase-2 preconditions. Not before.
@@ -236,6 +264,9 @@ win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.7 — 2026-08-19** — F.15: G6 (main v6.22 pre-ladder ICT dispatch) and G8
+  (config v4.20 registrations + 11:30 cutoff) BUILT, with
+  tests/test_ict_wiring.py. The suite is now reachable; nothing is armed.
 - **v1.6 — 2026-08-18** — F.13 ICT setup suite BUILT (strategy/ict/ v1.0:
   seven ranked continuous scorers, ICT-only sizing, three closed-by-default
   fire gates, tests/test_ict_setups.py) with docs/ICT_CORE_SPEC.md v1.0
