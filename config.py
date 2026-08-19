@@ -1,5 +1,9 @@
 """
-config.py — options_trader_smc v4.21 (fork of options_trader v4.18)
+config.py — options_trader_smc v4.22 (fork of options_trader v4.18)
+v4.22 — 2026-08-19 — SMC_OVERRIDE_LABEL, default OFF. The SMC core no longer
+        overwrites the committed regime label, so the legacy stack reads the
+        same labels as the parent fleet and the two stacks compete on their
+        own evidence instead of one silencing the other.
 v4.21 — 2026-08-19 — (1) MAX_LOSS_PCT 0.40 -> 0.25 by operator direction —
         tightens `stop_hit` (sweep + ICT), `hard_stop` (ORB) and the ADOPTED
         stops, which inherit it via ADOPTED_STOP_PCT. Butterfly (0.25 already),
@@ -637,6 +641,17 @@ FED_DAY_ORB_BOOST           = 0.20
 # was not allowed to". A silent deletion would have produced the second while
 # looking like the first.
 ORB_BLOCK_RANGING   = os.environ.get("OT_ORB_BLOCK_RANGING", "1") == "1"
+
+# v4.22 (2026-08-19) — DOES THE SMC CORE OVERRIDE THE COMMITTED LABEL?
+# DEFAULT NO. On 2026-08-19 it called a runaway breakout RANGING at conviction
+# 1.00 for a whole morning while the v1.3 classifier read BREAKOUT_VOLATILE
+# 0.75 on the same ticks, and every label-keyed gate downstream then reasoned
+# correctly to silence. The two stacks are now untangled: LEGACY reads the
+# L2/v13 label exactly as the parent fleet does, SMC/ICT reads structure via
+# ctx["smc"], and they compete for the entry slot on their own evidence.
+# Set to 1 to restore the v6.19 coupling deliberately — it is a measurable
+# choice, not a default.
+SMC_OVERRIDE_LABEL  = os.environ.get("OT_SMC_OVERRIDE_LABEL", "0") == "1"
 ORB_FIRES_REGARDLESS_OF_REGIME = True
 # When snapping an ORB strike target to the nearest available strike, break
 # toward the "higher" (more ITM / participation) or "lower" (further OTM) delta.

@@ -1,5 +1,28 @@
 """
-main.py — options_trader_smc v6.24
+main.py — options_trader_smc v6.25
+v6.25  2026-08-19  🔴 THE TWO STACKS ARE UNTANGLED AND NOW COMPETE.
+       2026-08-19 is the reason: the SMC core labelled a runaway breakout
+       RANGING at conviction 1.00 all morning while the v1.3 classifier read
+       BREAKOUT_VOLATILE 0.75 on the same ticks. Every downstream gate then
+       reasoned CORRECTLY from a wrong premise — CNT.6 refused the ORB-runaway
+       handoff on the grounds that a continuation needs a trend to continue,
+       and a nine-point directional move went untraded by anything.
+       A structural core still under validation must not be able to silence
+       the legacy stack that is its own comparison baseline.
+       (1) SMC NO LONGER OVERRIDES THE COMMITTED LABEL by default. LEGACY
+       reads `regime` (L2/v13, identical to the parent fleet); SMC/ICT reads
+       `ctx["smc"]` — structure, not the label. OT_SMC_OVERRIDE_LABEL=1
+       restores the v6.19 coupling for anyone who wants to measure it.
+       (2) THEY COMPETE FOR THE ENTRY SLOT and are mutually exclusive at the
+       POSITION level. Whoever is flat may fire; whoever is not stands down
+       and says so BY NAME — `blocked_by_legacy_trade_active` /
+       `blocked_by_smc_trade_active`, journaled with the refused signal. A
+       silent stand-down is indistinguishable from "no setup occurred", and
+       the entire point of running them side by side is knowing what each one
+       WANTED to do. Ownership is read from the live open records (a restart
+       rehydrates from the DB and any in-process memory is gone) and resolved
+       by PREFIX, so a strategy added later cannot become "legacy" by being
+       forgotten in a list.
 v6.24  2026-08-19  🔴 ICT GRADING WAS HOSTAGE TO ENTRY PERMISSION. SPLIT.
        v6.22 placed the whole ICT branch inside attempt_new_entry — which has
        five early returns above the insertion point (daily-loss halt,
@@ -768,7 +791,7 @@ from config import (
     CONT_BLOCK_PREMIUM_REGIMES,                 # CNT.6
     REGIME_REASSESS_MINUTES, INSTRUMENT, SessionConfig, DIRECTIONAL_ONLY,
     ORB_NO_ENTRY_AFTER_ET, BROKER_RECONCILE_ENABLED, ORB_FIRES_REGARDLESS_OF_REGIME,
-    ORB_BLOCK_RANGING,
+    ORB_BLOCK_RANGING, SMC_OVERRIDE_LABEL,
     DEBIT_DIRECTIONAL_CUTOFF_ET, DEBIT_DIRECTIONAL_STRATEGIES, DEBIT_BLOCK_ACTIVE,
     CONDOR_PF_TIMEFRAME,                        # PF.5
     RTH_OPEN_ET, ORB_WINDOW_MINUTES,            # TC.6 v2.1 — range from tape
@@ -1420,9 +1443,25 @@ def run_regime_classification(ctx: dict, trigger: str, state: BotState) -> Regim
                 liq_map=ctx["liq_map"], vol_state=ctx["vol"],
                 now_et=now_et())
             ctx["smc"] = smc_st
-            regime.primary_regime = smc_st.label
-            regime.conviction     = smc_st.confidence
-            _smc_label = smc_st.label
+            # ── v6.25 — THE TWO STACKS ARE UNTANGLED. ────────────────────────
+            # The SMC core no longer overwrites the committed label by default.
+            # 2026-08-19 is why: it called a runaway breakout RANGING at
+            # conviction 1.00 for the whole morning while the v1.3 classifier
+            # read BREAKOUT_VOLATILE 0.75 on the same ticks. Every downstream
+            # gate then reasoned CORRECTLY from a wrong premise — CNT.6 blocked
+            # the ORB-runaway handoff because "a continuation needs a trend to
+            # continue", and a nine-point directional move went untraded.
+            # A structural core that is still being validated must not be able
+            # to silence a legacy stack that is the comparison baseline.
+            # So: LEGACY reads `regime` (L2/v13, unchanged from the parent).
+            # SMC/ICT reads `ctx["smc"]` — structure, not the label. They
+            # compete for the entry slot on their own evidence.
+            # OT_SMC_OVERRIDE_LABEL=1 restores the v6.19 coupling for anyone
+            # who wants to measure it deliberately.
+            if SMC_OVERRIDE_LABEL:
+                regime.primary_regime = smc_st.label
+                regime.conviction     = smc_st.confidence
+                _smc_label = smc_st.label
             try:
                 _smc_engine.save()
             except Exception:                              # noqa: BLE001
@@ -2299,6 +2338,32 @@ def _l1_scores(ctx):
         return None
 
 
+def _stack_of(strategy_name: str) -> str:
+    """Which stack owns a strategy? v6.25.
+
+    Prefix match, not an enumeration: a strategy added later must not silently
+    become "legacy" because someone forgot to list it.
+    """
+    return "smc" if str(strategy_name or "").startswith("ICT") else "legacy"
+
+
+def _open_stack(pos_mgr) -> str:
+    """The stack that owns the CURRENT open position, or "" if flat.
+
+    Read from the live records rather than remembered, because a restart
+    rehydrates positions from the DB and any in-process memory of who opened
+    them is gone — the exact shape that keeps breaking here (WA §22).
+    """
+    try:
+        for rec in (pos_mgr.get_open_records() or []):
+            st = _stack_of(rec.get("strategy", ""))
+            if st:
+                return st
+    except Exception:                                          # noqa: BLE001
+        pass
+    return ""
+
+
 def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
     """Try to generate and execute a trade signal."""
     session  = get_session_guard()
@@ -2466,6 +2531,14 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
     # journal recorded is the state the entry decision was made on. If the
     # grading pass failed, ctx["ictx"] is absent and dispatch is skipped:
     # acting on a context we could not journal would be the worst of both.
+    # ── v6.25 — WHO HOLDS THE SLOT? ───────────────────────────────────────
+    # The two stacks compete for entries and are mutually exclusive at the
+    # POSITION level: whoever is flat may fire, whoever is not stands down and
+    # SAYS SO BY NAME. A silent stand-down is indistinguishable from "no setup
+    # occurred", and the whole point of running them side by side is knowing
+    # what each one WANTED to do.
+    _open_by = _open_stack(get_position_manager(state.paper_trading))
+
     ict_sig = None
     _ictx = ctx.get("ictx")
     if _ICT_OK and _ictx is not None:
@@ -2476,6 +2549,23 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
         except Exception as _ie:                               # noqa: BLE001
             logger.error("[ict] dispatch failed (%s) — no ICT entry this "
                          "tick; the ladder below is unaffected", _ie)
+    if ict_sig is not None and _open_by == "legacy":
+        # The SMC stack wanted this one and a legacy trade is live. Refused,
+        # named, and journaled with the full signal so the counterfactual is
+        # recoverable — "what did the legacy position cost the SMC stack?" is
+        # then a query, not a guess.
+        logger.info("STRATEGY: BLOCKED BY LEGACY TRADE ACTIVE — %s wanted the "
+                    "slot; a legacy position is open", ict_sig.strategy_name)
+        if _sigj is not None:
+            try:
+                _sigj.journal("disposition",
+                              outcome="blocked_by_legacy_trade_active",
+                              signal=_sigj.signal_ctx(ict_sig),
+                              regime=_sigj.regime_ctx(regime, _l1_scores(ctx)))
+            except Exception:                                  # noqa: BLE001
+                pass
+        ict_sig = None
+
     if ict_sig is not None:
         signal = ict_sig
         # ── SB/ORB SHARE THE SLOT, and the counterfactual is recorded ───────
@@ -2500,6 +2590,23 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
                     pass
         logger.info("[ict] %s takes the slot — the label ladder is skipped "
                     "this tick", signal.strategy_name)
+
+    # ── v6.25 — the legacy ladder stands down while an SMC trade is live ───
+    # The mirror of the block above. Evaluated BEFORE the ladder so no legacy
+    # branch can consume the slot, and journaled by name for the same reason:
+    # the cost of the ranking has to be recoverable from the record.
+    if _open_by == "smc" and signal is None:
+        logger.info("STRATEGY: BLOCKED BY SMC TRADE ACTIVE — the legacy ladder "
+                    "stands down while an ICT position is open")
+        if _sigj is not None:
+            try:
+                _sigj.journal("disposition",
+                              outcome="blocked_by_smc_trade_active",
+                              signal={"stack": "legacy", "stage": "pre_ladder"},
+                              regime=_sigj.regime_ctx(regime, _l1_scores(ctx)))
+            except Exception:                                  # noqa: BLE001
+                pass
+        return
 
     # Priority 1: ORB — only when the engine has a CONFIRMED break+retest.
     # With ORB_FIRES_REGARDLESS_OF_REGIME on, a confirmed ORB also fires under

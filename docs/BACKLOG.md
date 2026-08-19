@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.12
+# docs/BACKLOG.md — options_trader_smc — v1.13
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -398,6 +398,45 @@ grading call; its function is not invoked from an `else` arm), and **fails
 with 5 red cases against the pre-split code** — verified by reverting the
 block and re-running.
 
+**F.24 — [FLEET] 🔴 THE SMC CORE SILENCED THE LEGACY STACK. ✅ UNTANGLED
+2026-08-19 (main v6.25 / config v4.22).**
+**What happened.** 09:35 ORB range established 719.28–721.50. 09:37:04 a 1-min
+CLOSE at 718.66 broke the low. 09:40:04 the engine invalidated it — *ran to
+50% TP without retest, runaway breakout*. The runaway handoff was reached and
+**CNT.6 refused it, correctly on its own terms**, because the committed label
+said RANGING and "a continuation needs a trend to continue". A nine-point
+directional move went untraded by anything.
+**The premise was wrong, not the reasoning.** The SMC core had labelled the
+session **RANGING at conviction 1.00** — every structural condition for
+RANGING satisfied — while the v1.3 classifier read **BREAKOUT_VOLATILE 0.75**
+on the identical ticks. The label did not reach TRENDING_BEAR until 11:49 ET,
+two hours after the move: the lag pathology this fork exists to escape,
+reproduced by its replacement.
+**The fix is separation, not a patch to CNT.6.** Making CNT.6 respect the
+runaway flag again would reopen the squeeze the 2026-08-10 change closed and
+would treat a strategy that reasoned correctly as the culprit.
+(1) `SMC_OVERRIDE_LABEL` **defaults OFF**. LEGACY reads `regime` (L2/v13,
+identical to the parent fleet — which also restores the A/B against SPX).
+SMC/ICT reads `ctx["smc"]`: structure, not the label.
+(2) **The two stacks compete for the entry slot**, mutually exclusive at the
+POSITION level, each stand-down NAMED —
+`blocked_by_legacy_trade_active` / `blocked_by_smc_trade_active` — and
+journaled with the refused signal, so "what did the other stack cost this
+one?" is a query rather than a guess. Ownership resolves BY PREFIX from the
+LIVE open records, because a restart rehydrates positions from the DB and any
+in-process memory of who opened them is gone.
+`tests/test_stack_separation.py` v1.0 pins all four properties (no override by
+default AND the assignment nested under the flag — a flag that exists is not a
+flag that is consulted; prefix ownership incl. an unknown future strategy;
+both refusals named; the legacy block ahead of the ladder) with a
+deliberate-failure mode.
+⚠️ **STILL OPEN — the labeller itself.** Untangling stops the damage; it does
+not explain why a runaway breakout reads RANGING at 1.00. First suspect from
+the 09:30 `smc_setup` row: range 715.92–734.58 (19 points) on a session whose
+opening range was 2.22 — the dealing range is anchored to overnight swings, so
+intraday displacement is measured against a window in which nothing looks
+large (`displacement_sd: 0.0`). Testable against today's tape tonight.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -411,6 +450,10 @@ block and re-running.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.13 — 2026-08-19** — F.24: stacks untangled (main v6.25, config v4.22)
+  after the SMC core's RANGING-at-1.00 call suppressed a nine-point runaway;
+  they now compete with named mutual exclusion. The labeller defect itself
+  remains open.
 - **v1.12 — 2026-08-19** — F.23: grading split out of the entry path (main
   v6.24) after a live morning of zero journaled setups; test_ict_wiring v1.1
   re-pinned to reachability and proven red against the old shape.
