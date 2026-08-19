@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.5
+# docs/BACKLOG.md — options_trader_smc — v1.6
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -162,6 +162,39 @@ and the revocation — rather than hiding it.
 ⚠️ The ground truth (entry timestamps of those three trades) comes from the
 trade record, not from impression.
 
+**F.13 — [DESK] THE ICT SETUP SUITE. ✅ BUILT 2026-08-18 (this delivery);
+wiring + validation owed.** Seven setups from scratch per
+HANDOFF_FABLE_ICT_SETUPS, ranked (`strategy/ict/` v1.0): SilverBullet >
+JudasPO3 > Model2022 > SweepMSS > BreakerUnicorn > OTEConfluence > OBFVG.
+Each is a continuous SCORER, not a binary trigger: weighted components,
+`score` over available inputs, `completeness` capped by core gaps, REQUIRED
+components gate CONFIRM, and a 3-of-4 state journals as FORMING
+(`ict_setup`, banded 0.05). Size = f(ICT bias, displacement) ONLY —
+0/0.33/0.66/1.0 tiers, stated priors, never above baseline risk. No setup
+consults `primary_regime`; any future label use must be a scored `dir:`
+component (handoff §3.2). Three fire gates, all default closed:
+`OT_ICT_ARMED`, per-setup `OT_ICT_<NAME>_VALIDATED` (set only after a §3.5
+harness pass against an operator-pre-written condition), and the 11:30
+debit cutoff (journals `wants_credit`). Behavioural suite
+`tests/test_ict_setups.py` green incl. deliberate-failure check; smc_core +
+no_undefined_names re-verified green beside it.
+**Owed, in order:** (1) core gaps G1–G8 per `docs/ICT_CORE_SPEC.md` — the
+contract file; the suite consumes `ICTContext` v0.1 and flips on
+availability, no setup edits needed. G6 (pre-ladder dispatch wiring) and G8
+(config registrations) unblock first light; G1–G5 unblock SB/2022/Breaker/
+OTE respectively. (2) First validation candidate: **ICTSweepMSS** — the
+only setup whose full required chain completes on today's surface; operator
+writes the pass condition before the run. (3) F.14.
+
+**F.14 — [DESK] CREDIT EXPRESSION FOR AFTERNOON ICT SETUPS. Gate: measured
+`wants_credit` demand in the `ict_setup` journal.** Post-11:30 fire-eligible
+debit setups (OTE especially — the deep retrace lands late by construction)
+get expressed as credit verticals: the ICT layer supplies side, strike
+anchor (the invalidation level) and thesis; construction/execution reuses
+the TCS/`credit_vertical.py` machinery (POP-gated, mark-or-better) rather
+than growing a second credit path — the TCS.1 lesson. Not built in v1.0;
+dispatch journals the demand so this is sized by data, not appetite.
+
 ## PART 2 — DEFERRED, WITH THE GATE NAMED
 - **Sizing on structural confidence** — gated on the parent transition
   roadmap's five Phase-2 preconditions. Not before.
@@ -203,6 +236,11 @@ win rate is 0.4%. Leaving it armed is a choice — make it deliberately.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.6 — 2026-08-18** — F.13 ICT setup suite BUILT (strategy/ict/ v1.0:
+  seven ranked continuous scorers, ICT-only sizing, three closed-by-default
+  fire gates, tests/test_ict_setups.py) with docs/ICT_CORE_SPEC.md v1.0
+  recording core gaps G1–G8 as REQUESTED; F.14 (afternoon credit expression)
+  opened, gated on measured wants_credit demand.
 - **v1.5 — 2026-08-18** — F.12 opened with the acceptance-replay harness BUILT
   (backtest_harness v1.3 + tests/test_harness_smc_mode.py); the run itself and
   its pre-registered pass condition are recorded as owed.
