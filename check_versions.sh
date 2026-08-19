@@ -1,4 +1,28 @@
 #!/bin/bash
+# v4.55 — 2026-08-18 — FORK-CORRECTED, AND THE EXIT CODE NOW MEANS SOMETHING.
+#         Three defects, all found by RUNNING this file against the fork:
+#         (1) IT EXITED 0 WHILE PRINTING "DO NOT TRUST THIS SYNC." Every gate
+#             anyone wrote on `check_versions.sh; then …` was therefore
+#             vacuous — the script announced failure and reported success in
+#             the same breath. It now exits 1 on any canary/parity miss.
+#             ⚠️ If some caller depended on the old always-0 behaviour, that
+#             caller was already being lied to; fix the caller.
+#         (2) FOUR CANARIES WERE STALE-BY-FORK and could never pass here.
+#             Three grepped the literal title `main.py — options_trader v6.1`
+#             — VERSION-STRING canaries, which this file's own v4.54 entry
+#             warns against ("Canary greps the 5m-primary branch, never a
+#             version string") — and the fork's title is
+#             `main.py — options_trader_smc v6.21`. They are re-pinned to the
+#             BEHAVIOUR each was actually guarding. The fourth grepped
+#             `engine        = "L2" if l2_label`, the exact line the SMC
+#             wiring rewrote into the SMC/L2/v13 ternary; re-pinned to the
+#             property (regime_log rows carry an engine, whichever it is).
+#         (3) It had NO coverage of the fork's own core. Adds SMC canaries:
+#             the engine selector admits smc, the override branch exists, the
+#             revocation gate calls entry_permitted, ctx is bound before the
+#             gap write (the v6.18 P0), the L1 scorer is engine-independent
+#             (v6.21), and the trade-row engine tag is actually WRITTEN and
+#             not merely declared (F.2a).
 # v4.54 — 2026-08-17 — TCS.3 (main v6.12): the trend-participation bound now
 #         reads TODAY'S 09:30 5m bar — the 1m-only version lost its source
 #         bars at ~10:35 ET, 25 min before the credit window opened, so TC.6
@@ -528,7 +552,9 @@ check "analysis/trade_readiness.py"      "readiness_would_fire"         "v1.0 wo
 check "analysis/trade_readiness.py"      "TR_DEARM_SLOPE"               "v1.0 slope de-arm knob (falling confluence disarms)"
 check "analysis/trade_readiness.py"      "0.5 \*\* (dt / TR_SLOPE_HALFLIFE_S)" "v1.0 dt-aware slope EMA (wall-clock, no tick counters)"
 check "main.py"                          "_readiness.assess_all(ctx, regime)" "v4.3 readiness hooked in the every-tick block"
-check "main.py"                          "main.py — options_trader v6.1" "v6.1 main header current (ORB exempt from the stale entry gate)"
+# v4.55 — was a version-string grep on the parent's title. Re-pinned to the
+# BEHAVIOUR it guarded: the confirmed-ORB exemption from the stale-book block.
+check "main.py"                          "_orb_exempt = " "v6.1 ORB exemption is assigned, not just mentioned"
 check "main.py"                          "_orb_exempt"                  "v5.4 confirmed ORB bypasses the stale entry block"
 check "main.py"                          "STALE book, but ORB is CONFIRMED"  "v5.4 the exempt path says why in the log"
 check "tests/orb_stale_block_audit.py"   "ORB confirmed"                "v1.0 the cost of the gate is measurable, not asserted"
@@ -617,7 +643,9 @@ check "analysis/conviction_integrator.py" "theta_commit_by_regime"     "v2.3 RGM
 check "analysis/conviction_integrator.py" "p.commit_bar(top_r)"        "v2.3 the ARMING site uses the challenger's own bar, not the global"
 check "tests/test_ranging_commit_bar.py" "test_the_bar_stays_out_of_the_impostor_window" "v1.0 the bar may move; it may not move into the 12-15 bar false-flat zone"
 check "main.py"                          "not _cont_blocked"           "v6.0 CNT.6 — the runaway bypass must NOT reopen the premium regimes; its return is silent"
-check "main.py"                          "main.py — options_trader v6.1" "v6.1 header current"
+# v4.55 — version-string grep retired. The continuation premium block is the
+# behaviour that entry was really protecting.
+check "main.py"                          "_cont_blocked = " "v6.1 continuation premium block is assigned"
 check "config.py"                        "OT_CONT_BLOCK_PREMIUM"       "v6.0 kill switch AND A/B control"
 check "tests/test_continuation_premium_block.py" "test_runaway_cannot_bypass_a_premium_regime" "v1.0 the guard that matters"
 check "strategy/continuation_strategy.py" "CONT_CONFIRM_TOL_ATR"        "v1.6 CNT.7 — the confirmation tolerance must be ATR-scaled, never raw price"
@@ -640,7 +668,8 @@ check "analysis/regime_confluence.py"    '"DECELERATING": 0.25, "": 0.6' "v1.4 a
 check "analysis/regime_confluence.py"    '"ACCELERATING": 0.0, "": 0.0' "v1.4 absence must not CORROBORATE either — the asymmetry is deliberate"
 check "tests/test_sweep_spent_move.py"   "test_pltr_protection_survives" "v1.0 the guard that matters"
 check "main.py"                          "_L1_BREAKDOWN_FOR"           "v5.9 L1 evidence recorded at the fire, not replayed later"
-check "main.py"                          "main.py — options_trader v6.1" "v6.1 main header current"
+# v4.55 — version-string grep retired; the L1-breakdown capture is the thing.
+check "main.py"                          "_L1_BREAKDOWN_FOR.get(" "v6.1 L1 breakdown map is CONSULTED at the fire, not merely defined"
 check "tests/test_disposition_l1_capture.py" "test_orb_records_no_breakdown_by_design" "v1.0 ORB is regime-immune — a mapping there would imply a dependency that does not exist"
 check "tests/test_readiness_market_snapshot.py" "READ_from_the_engine_not_derived" "v1.0 side comes from the engine, never a derived sign"
 check "tests/test_readiness_peg_count.py" "counts_ramps_not_raw_values"  "v1.0 one definition of pegged"
@@ -715,7 +744,9 @@ check "main.py"  "L2.5 NOT committing"  "v4.6 non-committing L2 gate reports its
 check "main.py"  "_l2_mute"             "v4.6 reason-change throttle present"
 check "main.py"  "REGIME ENGINE:"       "v4.7 active regime engine stated at startup"
 check "main.py"  "warming as designed"  "v4.8 opening 1m warm-up logs INFO, not a false WARNING"
-check "main.py"  "engine        = \"L2\" if l2_label"  "v4.8 regime_log rows stamped with the engine"
+# v4.55 — the SMC wiring rewrote this into a three-way ternary. Pin the
+# PROPERTY (rows carry an engine) rather than one engine's literal branch.
+check "main.py"  "engine        = ("  "v4.8/v6.19 regime_log rows stamped with whichever engine ran"
 check "database/trade_logger.py"  "regime_engine"  "v4.8 trades carry regime_engine"
 check "database/trade_logger.py"  "ALTER TABLE regime_log ADD COLUMN engine"  "v4.8 regime_log auto-migrates"
 if grep -q '_REGIME_ENGINE == "L2"' main.py 2>/dev/null; then
@@ -961,6 +992,55 @@ echo ""
 echo "============================================================"
 echo "  PARITY INVARIANT — this checkout vs origin HEAD"
 echo "============================================================"
+# ── v4.55 — SMC CORE (fork: options_trader_smc) ──────────────────────────────
+# Every one of these guards a defect that was REPRODUCED on this fork, not a
+# hypothetical. Definition-shaped or call-site-shaped, never a version string.
+echo ""
+echo "-- SMC CORE ------------------------------------------------"
+check "main.py"                 "\"smc\")"                     "v6.19 engine selector admits smc"
+check "main.py"                 "_smc_engine.update("          "v6.19 SMC override CALL SITE, not just the import"
+check "main.py"                 "_smc_engine.entry_permitted(" "v6.19 revocation gate asks the engine"
+check "main.py"                 "ctx = {"                      "v6.18 P0 — ctx is BOUND before the Level.1/A2.6b writes"
+check "main.py"                 "ctx\[\"l1\"\] = _l1_res"          "v6.21 L1 scorer runs for EVERY engine (sweep gate + flat angle)"
+check "main.py"                 "set_engine_tag("              "F.2a the engine tag is RESOLVED at startup"
+check "database/trade_logger.py" "_ENGINE_TAG"                 "F.2a the tag is WRITTEN to the row, not merely declared"
+check "smc/smc_engine.py"       "def entry_permitted"          "v1.0 the gate function exists"
+check "smc/smc_engine.py"       "REVOKED"                      "v1.0 the revocation phase exists"
+check "smc/primitives.py"       "def raid_in_progress"         "v1.0 the anticipatory primitive exists"
+if grep -q "\"orb\":       orb," main.py 2>/dev/null; then
+    echo "  ✗ STALE:   main.py still builds ctx at the RETURN — the v6.18 P0 NameError is back"
+    MISS=$((MISS+1))
+fi
+
+# ── v4.55 — ICT SETUP SUITE (present only after F.13 lands) ──────────────────
+# CONDITIONAL on purpose: until the suite is committed its absence is the
+# correct state, and a canary that fails for "not built yet" is the cry-wolf
+# pattern this file exists to avoid. Once the directory exists it is checked
+# properly — including that the dispatch is NOT gated on a regime label.
+if [ -d strategy/ict ]; then
+    echo ""
+    echo "-- ICT SETUP SUITE -----------------------------------------"
+    check "strategy/ict/dispatch.py"    "def ict_dispatch"      "v1.0 the label-free dispatch entry point"
+    check "strategy/ict/scoring.py"     "def size_fraction"     "v1.0 size comes from bias x displacement"
+    check "strategy/ict/setup_base.py"  "class ICTSetup"        "v1.0 the setup contract"
+    check "strategy/ict/context.py"     "class ICTContext"      "v1.0 the structural context object"
+    check "tests/test_ict_setups.py"    "deliberate"            "v1.0 the suite carries a deliberate-failure mode"
+    _ict_n=$(ls strategy/ict/*.py 2>/dev/null | wc -l)
+    if [ "$_ict_n" -lt 12 ]; then
+        echo "  ✗ MISSING: strategy/ict has $_ict_n file(s), expected 12 — a partial extract"
+        MISS=$((MISS+1))
+    else
+        echo "  ✓ strategy/ict complete ($_ict_n files)"
+    fi
+    _ict_lab=$(grep -hE "primary_regime[[:space:]]*(==|!=|in )" strategy/ict/*.py 2>/dev/null | wc -l)
+    if [ "$_ict_lab" -gt 0 ]; then
+        echo "  ✗ STALE:   an ICT setup COMPARES primary_regime (handoff 3.2: a label may be used, never as a silent precondition)"
+        MISS=$((MISS+1))
+    else
+        echo "  ✓ no ICT setup gates on a regime label"
+    fi
+fi
+
 LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null)
 REMOTE_HEAD=$(timeout 10 git ls-remote origin HEAD 2>/dev/null | awk '{print $1}')
 if [ -z "$LOCAL_HEAD" ]; then
@@ -986,3 +1066,9 @@ else
     echo "  DONE — $MISS CANARY/PARITY FAILURE(S) — DO NOT TRUST THIS SYNC"
 fi
 echo "============================================================"
+# v4.55 — THE EXIT CODE NOW MATCHES THE VERDICT. This script previously
+# printed "DO NOT TRUST THIS SYNC" and returned 0, so every `&&` gate written
+# on it was decorative. A tool whose exit code contradicts its own output is
+# worse than no tool: it launders a red run into a green one.
+[ "$MISS" -eq 0 ] || exit 1
+exit 0
