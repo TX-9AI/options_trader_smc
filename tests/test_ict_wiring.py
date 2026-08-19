@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """
-tests/test_ict_wiring.py — is the ICT branch actually AHEAD of the ladder? v1.0
+tests/test_ict_wiring.py — grading is unconditional; action is gated. v1.1
+v1.1 — 2026-08-19 — 🔴 v1.0 PINNED THE WRONG PROPERTY AND CALLED IT A PASS.
+       Case A1 asserted the dispatch call was INSIDE attempt_new_entry and
+       reported that as correct. It is exactly what broke: attempt_new_entry
+       has five early returns above the insertion point and is called only in
+       an `else`, so on the first live morning the suite journaled ZERO rows
+       with no error anywhere. A test that confirms the shape of what was
+       built, rather than the property that was asked for, is worse than no
+       test — it certifies the defect.
+       v1.1 asserts the SPLIT: the GRADING pass (evaluate_all +
+       journal_setup_state) must live in run_regime_classification, outside
+       attempt_new_entry, reachable on a tick where no entry is possible; the
+       ACTION path (ict_dispatch) stays inside attempt_new_entry and must
+       CONSUME the context the grading pass built rather than rebuild it.
 v1.0 — 2026-08-19 — INITIAL (G6/G8).
 
 Four properties, every one of which fails SILENTLY if it breaks — the bot runs,
@@ -61,17 +74,40 @@ def main():
 
     ict_at = line_of(lambda l: "ict_dispatch(" in l and "=" in l)
     orb_at = line_of(lambda l: "Priority 1: ORB" in l)
-    if os.environ.get("OT_WIRE_SELFTEST", "0") == "1":
-        ict_at, orb_at = orb_at, ict_at        # deliberate corruption
 
-    check("A1 the ICT dispatch call is inside attempt_new_entry",
+    rfn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                and n.name == "run_regime_classification"), None)
+    grade_at = None
+    if rfn is not None:
+        for i in range(rfn.lineno - 1, rfn.end_lineno):
+            if "ict_journal_state(" in lines[i]:
+                grade_at = i + 1
+                break
+    if os.environ.get("OT_WIRE_SELFTEST", "0") == "1":
+        grade_at = None                        # deliberate corruption
+
+    # ── A. GRADING: unconditional, and NOT inside the entry function ───────
+    check("A1 the grading pass lives in run_regime_classification",
+          grade_at is not None and rfn is not None
+          and rfn.lineno < grade_at < rfn.end_lineno, str(grade_at))
+    check("A2 grading is OUTSIDE attempt_new_entry — the five early returns "
+          "above the entry path must not be able to silence it",
+          grade_at is not None and not (fn.lineno < grade_at < fn.end_lineno))
+    check("A3 grading calls evaluate_all AND journals every setup",
+          "ict_evaluate_all(" in src and "ict_journal_state(" in src)
+    check("A4 grading needs no options chain (a chain failure must not "
+          "silence the journal)", _grading_is_chain_free(src))
+    check("A5 the dispatch call is still inside attempt_new_entry (ACTION "
+          "belongs where permission is decided)",
           ict_at is not None and fn.lineno < ict_at < fn.end_lineno, str(ict_at))
-    check("A2 it runs BEFORE the label ladder's Priority 1",
+    check("A6 action CONSUMES the graded context, never rebuilds it",
+          'ctx.get("ictx")' in src
+          and src.count("build_ict_context(") == 1,
+          f"build_ict_context sites={src.count('build_ict_context(')}")
+    check("A7 the dispatch runs BEFORE the label ladder's Priority 1",
           ict_at is not None and orb_at is not None and ict_at < orb_at,
           f"ict@{ict_at} orb@{orb_at}")
-    check("A3 the context is built from the core's ctx, not re-derived",
-          "build_ict_context(" in src)
-    check("A4 it runs every tick — not nested under an arming check",
+    check("A8 nothing is nested under an arming check",
           _not_gated_by_arming(fn), "arming lives in the suite, not in main")
 
     body = "\n".join(lines[fn.lineno - 1:fn.end_lineno])
@@ -104,13 +140,58 @@ def main():
     check("D6 every per-setup validation gate defaults CLOSED",
           not any(config.ICT_VALIDATED.values()))
 
+    # ── E. THE PROPERTY THAT WAS ACTUALLY ASKED FOR ───────────────────────
+    # "It runs every tick" is a REACHABILITY claim, and the way it failed was
+    # reachability: five early returns and an `else` stood between the tick
+    # and the grading call. So ask it structurally — is the grading call
+    # dominated by any `return` inside its own function, and does its function
+    # get called unconditionally from the tick loop?
+    rets = [n.lineno for n in ast.walk(rfn) if isinstance(n, ast.Return)] if rfn else []
+    early = [r for r in rets if grade_at and r < grade_at]
+    check("E1 no early return precedes the grading call in its own function",
+          not early, f"returns before it: {early}")
+
+    called_in_else = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and node.orelse:
+            for sub in node.orelse:
+                for c in ast.walk(sub):
+                    if (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                            and c.func.id == "run_regime_classification"):
+                        called_in_else = True
+    check("E2 run_regime_classification is not called from an `else` arm",
+          not called_in_else,
+          "attempt_new_entry IS, which is half of why grading was silent")
+
+    # and the entry path must still be allowed to be gated — that is correct
+    entry_rets = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    check("E3 the ACTION path still sits behind its gates (by design)",
+          ict_at is not None and any(r < ict_at for r in entry_rets),
+          "entry permission decides trading, not grading")
+
     print()
     if FAILS:
         print(f"ict_wiring: {len(FAILS)} FAILED — " + "; ".join(FAILS))
         return 1
-    print("ict_wiring: ALL PASS (A pre-ladder position · B no label gate · "
-          "C fall-through intact · D gates closed)")
+    print("ict_wiring: ALL PASS (A grading unconditional + action gated · "
+          "B no label gate · C fall-through intact · D gates closed)")
     return 0
+
+
+def _grading_is_chain_free(src):
+    """The grading block must not reference `chain`.
+
+    A chain-fetch failure is one of the five early returns that silenced the
+    suite in the first place; if grading depended on the chain it would be
+    hostage to the same thing by another route.
+    """
+    i = src.find("ICT GRADING PASS")
+    j = src.find("LAYER-1 IS ENGINE-INDEPENDENT", i)
+    if i < 0 or j < 0:
+        return False
+    code = [l for l in src[i:j].splitlines()
+            if not l.lstrip().startswith("#")]
+    return not any("chain" in l for l in code)
 
 
 def _not_gated_by_arming(fn):

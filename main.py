@@ -1,5 +1,25 @@
 """
-main.py — options_trader_smc v6.23
+main.py — options_trader_smc v6.24
+v6.24  2026-08-19  🔴 ICT GRADING WAS HOSTAGE TO ENTRY PERMISSION. SPLIT.
+       v6.22 placed the whole ICT branch inside attempt_new_entry — which has
+       five early returns above the insertion point (daily-loss halt,
+       session.can_enter, stale regime book, chain-fetch failure, the UNKNOWN
+       hard gate) and is itself called only in an `else`, skipped whenever a
+       position is open or condor legs are being managed. Result on the first
+       live morning: ZERO ict_setup rows, with no error anywhere — the suite
+       imported fine, raised nothing, and simply was never reached.
+       ⚠️ My own v6.22 wiring test asserted the branch was INSIDE
+       attempt_new_entry and reported that as a virtue. It pinned what I had
+       built instead of the property that was asked for.
+       Now split: the GRADING pass (build_context + evaluate_all +
+       journal_setup_state) runs unconditionally in run_regime_classification,
+       needs no chain, and journals on ticks where no entry was possible —
+       which is the point, since a setup that formed while a position was open
+       is exactly the observation that tells us what the ranking costs. The
+       ACTION path (ict_dispatch) stays in attempt_new_entry and now CONSUMES
+       ctx["ictx"] rather than rebuilding it, so the state journaled is the
+       state the entry decision was made on. No ictx ⇒ no dispatch: acting on
+       a context we could not journal is the worst of both.
 v6.23  2026-08-19  ORB IS BLOCKED UNDER RANGING (operator direction: that
        cell is the conclusive loss leader). The refusal is JOURNALED as
        `gate_block:orb_ranging` rather than being a silent absence — without
@@ -870,6 +890,8 @@ _smc_last_setup_phase = None    # journal setup transitions once per change
 # which is a legitimate reading and would hide the outage.
 try:
     from strategy.ict import build_context as build_ict_context, ict_dispatch
+    from strategy.ict.dispatch import evaluate_all as ict_evaluate_all
+    from strategy.ict.scoring import journal_setup_state as ict_journal_state
     _ICT_OK = True
 except Exception as _icte:                      # pragma: no cover
     _ICT_OK = False
@@ -1284,6 +1306,37 @@ def run_regime_classification(ctx: dict, trigger: str, state: BotState) -> Regim
         trigger    = trigger
     )
     state.last_regime_at = now_utc()
+
+    # ── v6.24 — ICT GRADING PASS. UNCONDITIONAL, EVERY TICK. ────────────────
+    # 🔴 v6.22 put the whole ICT branch inside attempt_new_entry, which has
+    # FIVE early returns above it (daily-loss halt, session.can_enter, stale
+    # regime book, chain-fetch failure, the UNKNOWN hard gate) and is itself
+    # only called in an `else` — skipped entirely while a position is open or
+    # condor legs are being managed. So on 2026-08-19 the suite journaled
+    # NOTHING all morning: no [ict] lines, no dispatch errors, a healthy
+    # journal, zero ict_setup rows. Grading was hostage to entry permission.
+    # That is backwards. The journal of FORMING states is the only data the
+    # priors are ever fitted from, and it must accrue on the ticks where we
+    # could NOT have traded as much as the ones where we could — a setup that
+    # formed while a position was open is exactly the observation that tells
+    # us what the ranking costs.
+    # So: OBSERVATION here, unconditional and chain-free. ACTION stays in
+    # attempt_new_entry, where permission is decided. `ctx["ictx"]` carries the
+    # built context forward so the entry path does not rebuild it.
+    if _ICT_OK:
+        try:
+            ctx["ictx"] = build_ict_context(
+                smc_state=ctx.get("smc"), structure=ctx["structure"],
+                liq_map=ctx["liq_map"], df_1m=ctx.get("df_1m"),
+                now_et=now_et(), price=ctx["price"])
+            for _sc in ict_evaluate_all(ctx["ictx"]):
+                ict_journal_state(
+                    _sc, _sigj.journal if _sigj is not None else None)
+        except Exception as _ige:                              # noqa: BLE001
+            # LOUD: a silent failure here reads exactly like "no setup formed",
+            # which is a legitimate outcome. The two must never look alike.
+            logger.error("[ict] grading pass failed (%s) — no setup states "
+                         "journaled this tick", _ige)
 
     # ── v6.21 — LAYER-1 IS ENGINE-INDEPENDENT. RUN IT BEFORE THE BRANCH. ─────
     # 🔴 The v6.19 wiring left the L1 scorer call inside the `_REGIME_ENGINE ==
@@ -2406,20 +2459,22 @@ def attempt_new_entry(ctx: dict, regime: RegimeState, state: BotState):
     # (OT_ICT_ARMED, per-setup OT_ICT_<NAME>_VALIDATED, the 11:30 debit
     # cutoff), so until the operator arms a validated setup this branch can
     # only ever return None. `None` falls through to the ladder unchanged.
+    # v6.24 — ACTION ONLY. The GRADING pass already ran unconditionally in
+    # run_regime_classification and journaled every setup's state, so this
+    # branch is purely "may one of them fire?". It consumes the context built
+    # there rather than rebuilding it — one context per tick, so the state the
+    # journal recorded is the state the entry decision was made on. If the
+    # grading pass failed, ctx["ictx"] is absent and dispatch is skipped:
+    # acting on a context we could not journal would be the worst of both.
     ict_sig = None
-    if _ICT_OK:
+    _ictx = ctx.get("ictx")
+    if _ICT_OK and _ictx is not None:
         try:
-            ictx = build_ict_context(
-                smc_state=ctx.get("smc"), structure=ctx["structure"],
-                liq_map=ctx["liq_map"], df_1m=ctx.get("df_1m"),
-                now_et=now_et(), price=ctx["price"])
             ict_sig = ict_dispatch(
-                ictx, chain=chain, now_et=now_et(),
+                _ictx, chain=chain, now_et=now_et(),
                 journal=(_sigj.journal if _sigj is not None else None))
         except Exception as _ie:                               # noqa: BLE001
-            # LOUD. A silent failure here reads exactly like "no setup formed",
-            # which is a legitimate outcome — so the two must never look alike.
-            logger.error("[ict] dispatch failed (%s) — no ICT evaluation this "
+            logger.error("[ict] dispatch failed (%s) — no ICT entry this "
                          "tick; the ladder below is unaffected", _ie)
     if ict_sig is not None:
         signal = ict_sig

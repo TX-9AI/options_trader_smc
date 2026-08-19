@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.11
+# docs/BACKLOG.md — options_trader_smc — v1.12
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -369,6 +369,35 @@ how often it met its floor, and the required component that blocked most
 often. "SweepMSS never fired" is not actionable; "SweepMSS stalled on
 dir:sweep, mean 0.00" is — and that is how F.19 was found.
 
+**F.23 — [FLEET] 🔴 ICT GRADING WAS HOSTAGE TO ENTRY PERMISSION. ✅ SPLIT
+2026-08-19 (main v6.24).** First live morning: **zero `ict_setup` rows**, with
+the suite importing cleanly, raising nothing, and the journal healthy at
+101 KB. Cause: v6.22 put the whole ICT branch inside `attempt_new_entry`,
+which has FIVE early returns above the insertion point (daily-loss halt,
+`session.can_enter`, stale regime book, chain-fetch failure, the UNKNOWN hard
+gate) and is itself called only in an `else` — skipped entirely whenever a
+position is open or condor legs are being managed. Grading only happened when
+trading was already permitted.
+That is backwards. The journal of FORMING states is the only data the priors
+are ever fitted from, and it has to accrue on the ticks where we could NOT
+have traded as much as the ones where we could — **a setup that formed while a
+position was open is precisely the observation that tells us what the ranking
+costs.**
+Now split: GRADING (`build_context` + `evaluate_all` + `journal_setup_state`)
+runs unconditionally in `run_regime_classification`, needs no options chain,
+and journals regardless of entry permission. ACTION (`ict_dispatch`) stays in
+`attempt_new_entry` and CONSUMES `ctx["ictx"]` rather than rebuilding it, so
+the state journaled is the state the entry decision was made on. No ictx ⇒ no
+dispatch.
+🔴 **AND THE TEST CERTIFIED THE DEFECT.** `test_ict_wiring` v1.0 asserted "the
+ICT dispatch call is inside attempt_new_entry" and reported it as a PASS —
+pinning the shape of what was built rather than the property that was asked
+for. **A test that confirms your own construction is worse than no test.**
+v1.1 asserts the split, adds reachability checks (no early return precedes the
+grading call; its function is not invoked from an `else` arm), and **fails
+with 5 red cases against the pre-split code** — verified by reverting the
+block and re-running.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -382,6 +411,9 @@ dir:sweep, mean 0.00" is — and that is how F.19 was found.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.12 — 2026-08-19** — F.23: grading split out of the entry path (main
+  v6.24) after a live morning of zero journaled setups; test_ict_wiring v1.1
+  re-pinned to reachability and proven red against the old shape.
 - **v1.11 — 2026-08-19** — F.19 sweep evidence revived (primitives v1.1 +
   liquidity_mapper v4.2), F.20 key-contract test, F.21 observe v1.1 with
   component diagnostics.
