@@ -14,6 +14,27 @@ v3.16  2026-08-20  🔴 FEED.2 ROUTED EVERY 1h CANDLE TO THE WRONG SYMBOL FOR
        FIX: the map key carries the extended-hours flag, and the ingest router
        reads `tho=true` off the echoed symbol — the attribute `_interval_of`
        deliberately discards is exactly the one the router needed.
+v3.17  2026-08-20  RTH GUARD — the SECOND half of the same defect. Streaming
+       routes correctly after v3.16, but a restart's BACKFILL asked for
+       plain-symbol history and DXFeed returned 24-HOUR bars anyway (~12/hour
+       overnight vs 38-39 in RTH, reaching ~15 days back — the 08-05
+       boundary). SPX is the control that proves it is real extended-hours
+       data and not a timezone artifact: an index has no overnight session, so
+       it shows hours 13-20 UTC only and had nothing to contaminate.
+       ⚠️ WORSE THAN THE ORIGINAL HOLE: a gap announces itself, this does not.
+       The series CHANGES CHARACTER MID-STREAM — 07-31 RTH-only, 08-19
+       24-hour — with nothing marking the seam, so structure_analyzer's swings
+       and S/R (weight 2.0), the pitchfork's 1h fractals, trend_engine's 0.20
+       context vote and entry_snapshot all read a discontinuity they cannot
+       detect.
+       THE VENDOR FLAG IS NOT ENOUGH — `extended_trading_hours=False` was
+       passed and 24h history came back regardless — so the guarantee lives at
+       the WRITE, where it is ours to enforce.
+       ⚠️ SEGREGATES, DOES NOT DROP. EXT_INTERVAL is 1h only, so for
+       5m/15m/1m an overnight bar has NO other home and DXFeed history is
+       use-it-or-lose-it. Non-RTH bars on a plain route are stored under
+       `<SYM>_EXT` instead: the RTH series stays pure for the consumers built
+       to read it, and not one bar is lost.
        GUARD: the feed now REFUSES TO START if two subscriptions share a route
        key, if a subscription has no route, or if two subscriptions write the
        same (store_symbol, interval). The defect was not a typo; it was a
@@ -284,7 +305,7 @@ import sqlite3
 import traceback
 import threading
 import time as _time
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -413,6 +434,47 @@ if FEED_MODE not in _VALID_FEED_MODES:
         FEED_MODE, ", ".join(_VALID_FEED_MODES))
     FEED_MODE = "service"
 RECONNECT_MAX_S   = 60
+def _is_ext_route(store_symbol: str) -> bool:
+    """v3.17 — is this store symbol the extended-hours stream?"""
+    return str(store_symbol or "").endswith("_EXT")
+
+
+# v3.17 — RTH windows by interval, in ET, as (start, end) inclusive of start
+# and exclusive of end. Interval-aware because DXFeed aligns hour bars to the
+# HOUR: the 09:00 ET hour bar contains the 09:30 open and is legitimate RTH
+# data, while a 09:00 ET *minute* bar is pre-market. Getting this wrong in the
+# permissive direction leaves contamination; getting it wrong in the strict
+# direction deletes real bars, so the hour case is deliberately generous.
+_RTH_BY_INTERVAL = {
+    "1m":  ((9, 30), (16, 0)),
+    "5m":  ((9, 30), (16, 0)),
+    "15m": ((9, 30), (16, 0)),
+    "1h":  ((9, 0),  (16, 30)),
+}
+
+
+def _within_rth(ts_ms: int, interval: str) -> bool:
+    """Does this bar START inside the regular session, in ET?
+
+    Daily and coarser are always accepted — a 1d bar is stamped at midnight
+    and would fail every intraday test, which would silently delete the daily
+    series. That mistake is one line away and would be invisible until
+    something asked for a daily level.
+    """
+    win = _RTH_BY_INTERVAL.get(interval)
+    if win is None:                      # 1d, 1w, anything coarser
+        return True
+    try:
+        et = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).astimezone(ET)
+    except (OverflowError, OSError, ValueError):
+        return True                      # unparseable: let the poison guard rule
+    if et.weekday() >= 5:                # weekend bars are never RTH
+        return False
+    (sh, sm), (eh, em) = win
+    minutes = et.hour * 60 + et.minute
+    return (sh * 60 + sm) <= minutes < (eh * 60 + em)
+
+
 VIX_SYMBOL        = os.environ.get("OT_DXFEED_VIX", "VIX")
 VIX_INTERVALS     = ("1m", "1d")
 
@@ -777,6 +839,9 @@ class CandleFeed:
         # buffer[(store_symbol, interval)][ts_ms] = row tuple
         self.buffer: Dict[Tuple[str, str], Dict[int, Tuple]] = {}
         self._unmapped_seen: set = set()   # v3.7: warn-once on unmapped candles
+        # v3.17 — non-RTH bars SEGREGATED per (symbol, interval). Warn ONCE
+        # then count: a per-bar warning during a 15-day backfill buries the log.
+        self._rth_moved: Dict[Tuple[str, str], int] = {}
         self.backfill_logged: Dict[Tuple[str, str], bool] = {}
         # ── v3.4 chain-marks state (reset on every socket (re)connect) ────────
         self._chain_expiry: str = ""
@@ -880,6 +945,45 @@ class CandleFeed:
                 "REJECTED poison candle %s %s ts=%d: non-positive price "
                 "(o=%.4f h=%.4f l=%.4f c=%.4f)", key_sym, interval, ts_ms, o, h, l, cl)
             return
+
+        # ── RTH GUARD (v3.17) ────────────────────────────────────────────────
+        # 🔴 THE SECOND HALF OF THE FEED.2 DEFECT. Streaming routes correctly
+        # after v3.16, but a RESTART's backfill asked DXFeed for plain-symbol
+        # history and got 24-HOUR BARS back — ~12 bars/hour overnight against
+        # 38–39 in RTH, reaching ~15 days back (the 08-05 boundary). SPX proves
+        # it is real extended-hours data and not a timezone artifact: an index
+        # has no overnight session, so it shows hours 13–20 UTC only and had
+        # nothing to contaminate.
+        # ⚠️ WORSE THAN THE ORIGINAL HOLE. A gap announces itself; this does
+        # not. The series CHANGES CHARACTER MID-STREAM — 07-31 is RTH-only,
+        # 08-19 is 24-hour — with nothing marking the seam, so swings, S/R and
+        # the hourly pitchfork read a discontinuity they cannot detect.
+        # THE FLAG IS NOT ENOUGH. `extended_trading_hours=False` is passed on
+        # the subscription and the vendor returned 24h history anyway, so the
+        # guarantee has to live HERE, at the write, where it is ours to
+        # enforce: a PLAIN-symbol route accepts only RTH bars. `*_EXT` routes
+        # are untouched — carrying overnight is their entire purpose.
+        if not _is_ext_route(key_sym) and not _within_rth(ts_ms, interval):
+            # SEGREGATE, DO NOT DROP. For 5m/15m/1m there is NO extended
+            # stream — EXT_INTERVAL is 1h only — so an overnight bar arriving
+            # here is the ONLY copy that will ever exist, and DXFeed history is
+            # use-it-or-lose-it. Discarding it to protect the RTH series would
+            # trade one irreversible loss for another.
+            # The plain series stays RTH-pure (which is what structure_analyzer
+            # at weight 2.0, the pitchfork's 1h fractals, trend_engine's 0.20
+            # context vote and entry_snapshot were all built to read), and the
+            # bar is still stored — under the symbol that means "this carries
+            # overnight". Nothing RTH-scoped reads it; everything can query it.
+            alt = f"{key_sym}_EXT"
+            self._rth_moved[(key_sym, interval)] = \
+                self._rth_moved.get((key_sym, interval), 0) + 1
+            if self._rth_moved[(key_sym, interval)] == 1:
+                logger.warning(
+                    "RTH GUARD: non-RTH bars on the plain route for %s %s "
+                    "(first ts=%d) — SEGREGATING to %s so the RTH series stays "
+                    "pure and no bar is lost. Counting silently from here.",
+                    key_sym, interval, ts_ms, alt)
+            key_sym = alt
 
         row = (key_sym, interval, ts_ms, o, h, l, cl,
                float(getattr(c, "volume", 0) or 0))

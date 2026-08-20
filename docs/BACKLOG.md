@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.14
+# docs/BACKLOG.md — options_trader_smc — v1.15
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -464,6 +464,27 @@ exactly the one the router needed. GUARD: the feed REFUSES TO START on a
 duplicate route key, a routeless subscription, or two subscriptions writing
 one `(store_symbol, interval)`. `tests/test_candle_routing.py` proves both
 directions route and goes RED against the old two-part key.
+⚠️ **SECOND HALF (candle_feed v3.17 + tools/segregate_nonrth_bars.py).** After
+v3.16 streaming routed correctly, but the restart's BACKFILL asked for
+plain-symbol history and DXFeed returned **24-hour bars anyway** — ~12/hour
+overnight vs 38–39 in RTH, reaching back to 2026-08-05. **SPX is the control
+proving it is genuine extended-hours data rather than a timezone or DST
+artifact:** an index has no overnight session, so it shows hours 13–20 UTC
+only and had nothing to contaminate.
+**Worse than the original hole** — a gap announces itself, this does not. The
+series CHANGES CHARACTER MID-STREAM (07-31 RTH-only, 08-19 24-hour) with
+nothing marking the seam, and `structure_analyzer`'s swings and S/R (weight
+**2.0**, the heaviest structural input), the pitchfork's 1h fractals,
+`trend_engine`'s 0.20 context vote and `entry_snapshot` all read across it.
+ADX is unaffected — v1.1 sourced it from 5m precisely because 1h lagged.
+The vendor flag was passed and ignored (`extended_trading_hours=False`, 24h
+history returned regardless), so the guarantee lives at the WRITE.
+⚠️ **SEGREGATED, NOT DELETED** — `EXT_INTERVAL` is 1h ONLY, so an overnight
+5m/15m/1m bar is the only copy that will ever exist and DXFeed history is
+use-it-or-lose-it; deleting to protect the RTH series would trade one
+irreversible loss for another. Non-RTH rows move to `<SYM>_EXT`: the RTH
+series is pure again for the consumers built to read it, and every bar stays
+queryable. Destination collisions are REPORTED, never merged.
 ⚠️ History is not repaired — plain-symbol 1h from 08-14 to the deploy is gone;
 DXFeed history is use-it-or-lose-it. Restart backfill refills what the API
 still serves.
@@ -481,6 +502,10 @@ still serves.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.15 — 2026-08-20** — F.25 second half: candle_feed v3.17 RTH guard
+  (segregates non-RTH bars to <SYM>_EXT rather than dropping them, because
+  5m/15m/1m have no extended stream) + tools/segregate_nonrth_bars.py for the
+  rows already written.
 - **v1.14 — 2026-08-20** — F.25: candle_feed v3.16 fixes the FEED.2 route
   collision that sent every 1h bar to *_EXT for six days fleet-wide; this
   invalidates the week's SMC labeller diagnoses, which ran on 08-14 structure.

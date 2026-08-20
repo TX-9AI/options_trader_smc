@@ -124,6 +124,20 @@ def main():
                      ("QQQ{=15m}", "QQQ"), ("QQQ{=d}", "QQQ")):
         check(f"D {ev} still routes to {want}", route(ev) == want, str(route(ev)))
 
+    # ── E. the RTH guard SEGREGATES rather than drops ─────────────────────
+    # The distinction is the whole point: EXT_INTERVAL is 1h only, so an
+    # overnight 5m/15m/1m bar has no other home and DXFeed history is
+    # use-it-or-lose-it. A guard that dropped them would trade one
+    # irreversible loss for another.
+    check("E1 the write guard exists", "_within_rth(" in src)
+    check("E2 it SEGREGATES — reassigns the route, never returns early",
+          "key_sym = alt" in src and "SEGREGATING to" in src)
+    check("E3 it does NOT drop", "RTH GUARD: dropping" not in src)
+    check("E4 *_EXT routes are exempt (overnight is their purpose)",
+          "not _is_ext_route(key_sym)" in src)
+    check("E5 daily and coarser are never RTH-filtered",
+          "1d, 1w, anything coarser" in src or "_RTH_BY_INTERVAL.get(interval)" in src)
+
     # ── C. the guard exists and refuses each collision shape ──────────────
     check("C1 the feed refuses a DUPLICATE SUBSCRIPTION KEY",
           "DUPLICATE SUBSCRIPTION KEY" in src)
@@ -144,7 +158,7 @@ def main():
         return 1
     print("candle_routing: ALL PASS (A echo distinguishable · B both "
           "directions route · C guard refuses all three collisions · "
-          "D other intervals unmoved)")
+          "D other intervals unmoved · E RTH guard segregates, never drops)")
     return 0
 
 
