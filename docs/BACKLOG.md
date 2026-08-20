@@ -1,4 +1,4 @@
-# docs/BACKLOG.md — options_trader_smc — v1.13
+# docs/BACKLOG.md — options_trader_smc — v1.14
 
 **Fork opened 2026-08-18 from options_trader_v3 @ `0720753`. Candidate: QQQ —
 the EXISTING box, converted (operator's decision, 2026-08-18; SPX stays on the
@@ -437,6 +437,37 @@ opening range was 2.22 — the dealing range is anchored to overnight swings, so
 intraday displacement is measured against a window in which nothing looks
 large (`displacement_sd: 0.0`). Testable against today's tape tonight.
 
+**F.25 — [FLEET] 🔴 EVERY 1h CANDLE WENT TO THE WRONG SYMBOL FOR SIX DAYS.
+✅ FIXED 2026-08-20 (candle_feed v3.16). SHIPS TO BOTH REPOS — the file is
+byte-identical in each, so the defect and the fix are shared.**
+`symbol_map` was keyed on `(dx_symbol, interval)`, and FEED.2 subscribes the
+same symbol at the same interval TWICE — RTH and extended. The second
+registration overwrote the first, so the single ingest lookup could not tell
+the echoes apart and **every 1h bar landed under `*_EXT`**. Measured: plain
+`QQQ` 1h newest **2026-08-14 19:00**, plain `SPX` 1h newest **08-14 20:00**,
+both `*_EXT` current. 1h feeds `structure_analyzer`'s swings and S/R, the
+pitchfork and its observer, and `entry_snapshot`.
+⚠️ **THIS INVALIDATES THIS WEEK'S SMC DIAGNOSES.** The cutover was 08-18; the
+1h froze 08-14. **The SMC core has never once run on current higher-timeframe
+structure.** The RANGING-at-conviction-1.00 call that suppressed the 08-19
+runaway, the frozen dealing range (`range_high: 0.0`), the absent displacement
+(`displacement_sd: 0.0`) — all downstream of six-day-old swings. F.24's
+untangle remains correct for its own reasons (neither engine should be able to
+silence the other), but the diagnosis of WHY the label was wrong was built on
+rotten input and was stated more confidently than the evidence supported.
+⚠️ **Nothing raised.** `BLIND BARS_STALE … refused=False` warned every five
+minutes for six days and the fleet traded on it. The alarm worked; nobody was
+reading it. That is a separate finding and it belongs on the review list.
+FIX: the map key carries the extended-hours flag; the router reads `tho=true`
+off the echoed symbol — the attribute `_interval_of` deliberately discards is
+exactly the one the router needed. GUARD: the feed REFUSES TO START on a
+duplicate route key, a routeless subscription, or two subscriptions writing
+one `(store_symbol, interval)`. `tests/test_candle_routing.py` proves both
+directions route and goes RED against the old two-part key.
+⚠️ History is not repaired — plain-symbol 1h from 08-14 to the deploy is gone;
+DXFeed history is use-it-or-lose-it. Restart backfill refills what the API
+still serves.
+
 ## PART 3 — RESOLVED REGISTER
 - **P0 ctx NameError (main v6.18, 2026-08-18).** v6.16/v6.17 wrote
   `ctx["gap"]`/`ctx["level_near"]` before `ctx` existed; the handler re-raised;
@@ -450,6 +481,9 @@ large (`displacement_sd: 0.0`). Testable against today's tape tonight.
   CONFIRM-tier necessary condition). Caught by test E2.
 
 ## PART 4 — CHANGELOG
+- **v1.14 — 2026-08-20** — F.25: candle_feed v3.16 fixes the FEED.2 route
+  collision that sent every 1h bar to *_EXT for six days fleet-wide; this
+  invalidates the week's SMC labeller diagnoses, which ran on 08-14 structure.
 - **v1.13 — 2026-08-19** — F.24: stacks untangled (main v6.25, config v4.22)
   after the SMC core's RANGING-at-1.00 call suppressed a nine-point runaway;
   they now compete with named mutual exclusion. The labeller defect itself

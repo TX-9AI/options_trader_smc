@@ -1,5 +1,28 @@
 """
-data/candle_feed.py  addendum v3.15 (see below); original header follows.
+data/candle_feed.py  addendum v3.16 (see below); original header follows.
+v3.16  2026-08-20  🔴 FEED.2 ROUTED EVERY 1h CANDLE TO THE WRONG SYMBOL FOR
+       SIX DAYS, FLEET-WIDE. `symbol_map` was keyed on (dx_symbol, interval)
+       and FEED.2 subscribes the SAME symbol at the SAME interval twice — RTH
+       and extended. The second registration overwrote the first, so one
+       lookup could not tell them apart and every 1h bar landed under the EXT
+       store symbol. Measured 2026-08-20: plain QQQ and SPX 1h frozen at
+       2026-08-14 while *_EXT 1h was current. Six days of stale higher-
+       timeframe structure feeding structure_analyzer's swings and S/R, the
+       pitchfork and its observer, and entry_snapshot — on every box that took
+       FEED.2. Nothing raised. BARS_STALE warned every five minutes with
+       `refused=False` and the bots traded on 08-14 bars regardless.
+       FIX: the map key carries the extended-hours flag, and the ingest router
+       reads `tho=true` off the echoed symbol — the attribute `_interval_of`
+       deliberately discards is exactly the one the router needed.
+       GUARD: the feed now REFUSES TO START if two subscriptions share a route
+       key, if a subscription has no route, or if two subscriptions write the
+       same (store_symbol, interval). The defect was not a typo; it was a
+       route table that could silently lose an entry, and that must be
+       impossible rather than merely fixed.
+       ⚠️ The existing rows are not repaired by this — plain-symbol 1h history
+       between 08-14 and the deploy is simply absent and DXFeed history is
+       use-it-or-lose-it. Backfill on restart will refill what the API still
+       serves.
 v3.15  2026-08-18  TERM.1: read_chain_subs UNIONS AUXILIARY TENORS.
         Every chain snapshot to date carries a SINGLE expiry equal to the
         session date, so TERM STRUCTURE - the one thing options data says about
@@ -681,10 +704,14 @@ class CandleFeed:
         self.subs: List[Tuple[str, str, datetime, bool]] = []
         for tf in TIMEFRAMES.keys():
             self.subs.append((self.dx_symbol, tf, _backfill_start(tf), False))
-            self.symbol_map[(self.dx_symbol, tf)] = INSTRUMENT
+            # v3.16 — the key now carries the EXTENDED-HOURS FLAG, because
+            # (dx_symbol, interval) is NOT unique: FEED.2 subscribes the same
+            # symbol+interval twice and the second registration used to
+            # overwrite the first. Three-tuple, one entry per subscription.
+            self.symbol_map[(self.dx_symbol, tf, False)] = INSTRUMENT
         for tf in VIX_INTERVALS:
             self.subs.append((VIX_SYMBOL, tf, _backfill_start(tf), False))
-            self.symbol_map[(VIX_SYMBOL, tf)] = "VIX"
+            self.symbol_map[(VIX_SYMBOL, tf, False)] = "VIX"
 
         # ── FEED.2 (2026-08-15) — THE OVERNIGHT STREAM ───────────────────────
         # ⚠️ THE TAPE WAS NEVER UNAVAILABLE. WE WERE ASKING DXFEED TO EXCLUDE IT.
@@ -708,7 +735,45 @@ class CandleFeed:
         if EXT_1H_ENABLED:
             self.subs.append((self.dx_symbol, EXT_INTERVAL,
                               _backfill_start(EXT_INTERVAL), True))
-            self.symbol_map[(self.dx_symbol, EXT_INTERVAL)] = EXT_STORE_SYMBOL
+            self.symbol_map[(self.dx_symbol, EXT_INTERVAL, True)] = EXT_STORE_SYMBOL
+        # ── v3.16 — COLLISION GUARD. REFUSE TO START ON A DUPLICATE ROUTE ───
+        # The FEED.2 defect was not that someone wrote a wrong key; it was that
+        # TWO subscriptions could legally resolve to the SAME store target and
+        # nothing said so. Six days of stale 1h structure followed, fleet-wide,
+        # with no error. A route table that can silently lose an entry must not
+        # be allowed to start.
+        # Two invariants, both cheap and both checked before a socket opens:
+        #   1. no two SUBSCRIPTIONS share a map key (one would overwrite the
+        #      other, which is exactly what happened)
+        #   2. no two map keys point at the SAME (store_symbol, interval) —
+        #      two live streams writing one table is a silent merge
+        _seen_keys, _seen_targets = set(), {}
+        for (_ds, _tf, _st, _ex) in self.subs:
+            _k = (_ds, _tf, bool(_ex))
+            if _k in _seen_keys:
+                raise RuntimeError(
+                    f"candle_feed: DUPLICATE SUBSCRIPTION KEY {_k} — two "
+                    f"subscriptions resolve to one route and one would "
+                    f"silently overwrite the other (the FEED.2 defect, "
+                    f"2026-08-14..20). Refusing to start.")
+            _seen_keys.add(_k)
+            _tgt = (self.symbol_map.get(_k), _tf)
+            if _tgt[0] is None:
+                raise RuntimeError(
+                    f"candle_feed: SUBSCRIPTION {_k} HAS NO ROUTE in "
+                    f"symbol_map — its candles would be dropped. Refusing "
+                    f"to start.")
+            if _tgt in _seen_targets:
+                raise RuntimeError(
+                    f"candle_feed: TWO SUBSCRIPTIONS WRITE {_tgt} — "
+                    f"{_seen_targets[_tgt]} and {_k}. One stream would "
+                    f"silently merge into the other's table. Refusing to "
+                    f"start.")
+            _seen_targets[_tgt] = _k
+        logger.info("candle_feed routes verified: %d subscription(s), "
+                    "%d distinct store target(s)",
+                    len(_seen_keys), len(_seen_targets))
+
         # buffer[(store_symbol, interval)][ts_ms] = row tuple
         self.buffer: Dict[Tuple[str, str], Dict[int, Tuple]] = {}
         self._unmapped_seen: set = set()   # v3.7: warn-once on unmapped candles
@@ -743,22 +808,48 @@ class CandleFeed:
         token = token.split(",", 1)[0].strip()      # drop ',tho=true' etc.
         return {"m": "1m", "h": "1h", "d": "1d", "s": "1s"}.get(token, token)
 
+    @staticmethod
+    def _is_ext_of(event_symbol: str) -> bool:
+        """v3.16 — IS THIS ECHO FROM THE EXTENDED-HOURS SUBSCRIPTION?
+
+        🔴 THE BUG THIS EXISTS FOR. FEED.2 subscribes the SAME dx symbol at the
+        SAME interval twice — once RTH-only, once with extended_trading_hours —
+        and registered both in `symbol_map` under `(dx_symbol, interval)`. The
+        keys are identical, so the second assignment silently overwrote the
+        first and EVERY 1h candle was routed to the EXT store symbol. Measured
+        2026-08-20 across the fleet: plain `QQQ`/`SPX` 1h frozen at 2026-08-14
+        while `*_EXT` 1h was current — SIX DAYS of stale higher-timeframe
+        structure feeding structure_analyzer's swings and S/R, the pitchfork
+        and its observer, and entry_snapshot. Nothing raised; BARS_STALE warned
+        every five minutes with `refused=False` and the bots kept trading on
+        08-14 bars.
+        `tho=true` is the ONLY thing that distinguishes the two echoes, and
+        `_interval_of` deliberately discards it. So read it here instead: the
+        attribute the parser drops is exactly the attribute the router needs.
+        """
+        if "{=" not in (event_symbol or ""):
+            return False
+        attrs = event_symbol.split("{=", 1)[1].rstrip("}")
+        return "tho=true" in attrs.replace(" ", "").lower()
+
     def _on_candle(self, c: Candle):
         ev_sym = getattr(c, "event_symbol", "")
         base = _base_symbol(ev_sym)
         interval = self._interval_of(ev_sym) or ""
-        key_sym = self.symbol_map.get((base, interval))
+        is_ext = self._is_ext_of(ev_sym)
+        key_sym = self.symbol_map.get((base, interval, is_ext))
         if key_sym is None:
             # v3.7: NEVER drop a candle silently. This branch swallowed the whole
             # feed on 07-13/14/15 (unparsed interval) with no log anywhere. Warn
             # once per distinct unmapped key so a future echo-format change is
             # visible within one line instead of a wasted session.
-            if ev_sym and (base, interval) not in self._unmapped_seen:
-                self._unmapped_seen.add((base, interval))
+            if ev_sym and (base, interval, is_ext) not in self._unmapped_seen:
+                self._unmapped_seen.add((base, interval, is_ext))
                 logger.warning(
-                    "DROPPING candles: event_symbol=%r -> (base=%r, interval=%r) "
-                    "NOT in symbol_map %r — storing nothing for it",
-                    ev_sym, base, interval, sorted(self.symbol_map.keys()))
+                    "DROPPING candles: event_symbol=%r -> (base=%r, interval=%r, "
+                    "ext=%r) NOT in symbol_map %r — storing nothing for it",
+                    ev_sym, base, interval, is_ext,
+                    sorted(self.symbol_map.keys()))
             return
         if c.time is None or c.open is None:
             return
@@ -871,7 +962,7 @@ class CandleFeed:
         """One-time per (symbol, interval): report depth vs required count so
         entitlement gaps surface in the journal (FIRST-RUN CHECKLIST #1)."""
         for (dx_sym, tf, _start, _ext) in self.subs:
-            sym = self.symbol_map[(dx_sym, tf)]
+            sym = self.symbol_map[(dx_sym, tf, bool(_ext))]
             if self.backfill_logged.get((sym, tf)):
                 continue
             n = self.store.bar_count(sym, tf)
@@ -1095,7 +1186,7 @@ class CandleFeed:
                         # different purpose.
                         if PRUNE_KEEP_ROWS and _time.time() - last_prune >= PRUNE_EVERY_S:
                             for (dx_sym, tf, _s, _e) in self.subs:
-                                sym = self.symbol_map[(dx_sym, tf)]
+                                sym = self.symbol_map[(dx_sym, tf, bool(_e))]
                                 self.store.prune(sym, tf, PRUNE_KEEP_ROWS)
                             self.store.commit()
                             last_prune = _time.time()
